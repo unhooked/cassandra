@@ -57,6 +57,7 @@ public class SSTableExport
     private static final String DEBUG_OUTPUT_OPTION = "d";
     private static final String EXCLUDE_KEY_OPTION = "x";
     private static final String ENUMERATE_KEYS_OPTION = "e";
+    private static final String RAW_TIMESTAMPS = "t";
 
     private static final Options options = new Options();
     private static CommandLine cmd;
@@ -65,21 +66,24 @@ public class SSTableExport
     {
         Config.setClientMode(true);
 
-        Option optKey = new Option(KEY_OPTION, true, "Row key");
+        Option optKey = new Option(KEY_OPTION, true, "Partition key");
         // Number of times -k <key> can be passed on the command line.
         optKey.setArgs(500);
         options.addOption(optKey);
 
-        Option excludeKey = new Option(EXCLUDE_KEY_OPTION, true, "Excluded row key");
+        Option excludeKey = new Option(EXCLUDE_KEY_OPTION, true, "Excluded partition key");
         // Number of times -x <key> can be passed on the command line.
         excludeKey.setArgs(500);
         options.addOption(excludeKey);
 
-        Option optEnumerate = new Option(ENUMERATE_KEYS_OPTION, false, "enumerate keys only");
+        Option optEnumerate = new Option(ENUMERATE_KEYS_OPTION, false, "enumerate partition keys only");
         options.addOption(optEnumerate);
 
         Option debugOutput = new Option(DEBUG_OUTPUT_OPTION, false, "CQL row per line internal representation");
         options.addOption(debugOutput);
+
+        Option rawTimestamps = new Option(RAW_TIMESTAMPS, false, "Print raw timestamps instead of iso8601 date strings");
+        options.addOption(rawTimestamps);
     }
 
     /**
@@ -94,14 +98,10 @@ public class SSTableExport
         if (!desc.version.storeRows())
             throw new IOException("pre-3.0 SSTable is not supported.");
 
-        EnumSet<MetadataType> types = EnumSet.of(MetadataType.VALIDATION, MetadataType.STATS, MetadataType.HEADER);
+        EnumSet<MetadataType> types = EnumSet.of(MetadataType.STATS, MetadataType.HEADER);
         Map<MetadataType, MetadataComponent> sstableMetadata = desc.getMetadataSerializer().deserialize(desc, types);
-        ValidationMetadata validationMetadata = (ValidationMetadata) sstableMetadata.get(MetadataType.VALIDATION);
         SerializationHeader.Component header = (SerializationHeader.Component) sstableMetadata.get(MetadataType.HEADER);
-
-        IPartitioner partitioner = SecondaryIndexManager.isIndexColumnFamily(desc.cfname)
-                                   ? new LocalPartitioner(header.getKeyType())
-                                   : FBUtilities.newPartitioner(validationMetadata.partitioner);
+        IPartitioner partitioner = FBUtilities.newPartitioner(desc);
 
         CFMetaData.Builder builder = CFMetaData.Builder.create("keyspace", "table").withPartitioner(partitioner);
         header.getStaticColumns().entrySet().stream()
@@ -180,7 +180,10 @@ public class SSTableExport
             CFMetaData metadata = metadataFromSSTable(desc);
             if (cmd.hasOption(ENUMERATE_KEYS_OPTION))
             {
-                JsonTransformer.keysToJson(null, iterToStream(new KeyIterator(desc, metadata)), metadata, System.out);
+                JsonTransformer.keysToJson(null, iterToStream(new KeyIterator(desc, metadata)),
+                                                              cmd.hasOption(RAW_TIMESTAMPS),
+                                                              metadata,
+                                                              System.out);
             }
             else
             {
@@ -233,7 +236,7 @@ public class SSTableExport
                 }
                 else
                 {
-                    JsonTransformer.toJson(currentScanner, partitions, metadata, System.out);
+                    JsonTransformer.toJson(currentScanner, partitions, cmd.hasOption(RAW_TIMESTAMPS), metadata, System.out);
                 }
             }
         }

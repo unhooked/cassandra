@@ -1,3 +1,23 @@
+/*
+ *
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ */
 package org.apache.cassandra.io.util;
 
 import java.io.File;
@@ -67,12 +87,6 @@ public class RandomAccessReaderTest
             this.maxSegmentSize = maxSegmentSize;
             return this;
         }
-
-        public Parameters expected(byte[] expected)
-        {
-            this.expected = expected;
-            return this;
-        }
     }
 
     @Test
@@ -108,6 +122,7 @@ public class RandomAccessReaderTest
     @Test
     public void testMultipleSegments() throws IOException
     {
+        // FIXME: This is the same as above.
         testReadFully(new Parameters(8192, 4096).mmappedRegions(true).maxSegmentSize(1024));
     }
 
@@ -119,7 +134,7 @@ public class RandomAccessReaderTest
 
         try(ChannelProxy channel = new ChannelProxy("abc", new FakeFileChannel(SIZE)))
         {
-            RandomAccessReader.Builder builder = new RandomAccessReader.Builder(channel)
+            RandomAccessReader.Builder builder = RandomAccessReader.builder(channel)
                                                  .bufferType(params.bufferType)
                                                  .bufferSize(params.bufferSize);
 
@@ -270,11 +285,15 @@ public class RandomAccessReaderTest
         final File f = writeFile(params);
         try(ChannelProxy channel = new ChannelProxy(f))
         {
-            RandomAccessReader.Builder builder = new RandomAccessReader.Builder(channel)
+            RandomAccessReader.Builder builder = RandomAccessReader.builder(channel)
                                                  .bufferType(params.bufferType)
                                                  .bufferSize(params.bufferSize);
+            MmappedRegions regions = null;
             if (params.mmappedRegions)
-                builder.regions(MmappedRegions.map(channel, f.length()));
+            {
+                regions = MmappedRegions.map(channel, f.length());
+                builder.regions(regions);
+            }
 
             try(RandomAccessReader reader = builder.build())
             {
@@ -296,8 +315,8 @@ public class RandomAccessReaderTest
                 assertEquals(0, reader.bytesRemaining());
             }
 
-            if (builder.regions != null)
-                assertNull(builder.regions.close(null));
+            if (regions != null)
+                assertNull(regions.close(null));
         }
     }
 
@@ -316,7 +335,7 @@ public class RandomAccessReaderTest
         assert f.exists();
 
         try(ChannelProxy channel = new ChannelProxy(f);
-            RandomAccessReader reader = new RandomAccessReader.Builder(channel).build())
+            RandomAccessReader reader = RandomAccessReader.builder(channel).build())
         {
             assertEquals(f.getAbsolutePath(), reader.getPath());
             assertEquals(expected.length(), reader.length());
@@ -346,7 +365,7 @@ public class RandomAccessReaderTest
         assert f.exists();
 
         try(ChannelProxy channel = new ChannelProxy(f);
-        RandomAccessReader reader = new RandomAccessReader.Builder(channel).build())
+        RandomAccessReader reader = RandomAccessReader.builder(channel).build())
         {
             assertEquals(expected.length() * numIterations, reader.length());
 
@@ -428,7 +447,7 @@ public class RandomAccessReaderTest
         {
             final Runnable worker = () ->
             {
-                try(RandomAccessReader reader = new RandomAccessReader.Builder(channel).build())
+                try(RandomAccessReader reader = RandomAccessReader.builder(channel).build())
                 {
                     assertEquals(expected.length, reader.length());
 

@@ -91,7 +91,7 @@ public abstract class AbstractCell extends Cell
                 // Note that as long as the expiring column and the tombstone put together live longer than GC grace seconds,
                 // we'll fulfil our responsibility to repair. See discussion at
                 // http://cassandra-user-incubator-apache-org.3065146.n2.nabble.com/repair-compaction-and-tombstone-rows-td7583481.html
-                return BufferCell.tombstone(column, timestamp(), localDeletionTime() - ttl());
+                return BufferCell.tombstone(column, timestamp(), localDeletionTime() - ttl(), path());
             }
         }
         return this;
@@ -131,8 +131,6 @@ public abstract class AbstractCell extends Cell
 
     public void validate()
     {
-        column().validateCellValue(value());
-
         if (ttl() < 0)
             throw new MarshalException("A TTL should not be negative");
         if (localDeletionTime() < 0)
@@ -140,12 +138,24 @@ public abstract class AbstractCell extends Cell
         if (isExpiring() && localDeletionTime() == NO_DELETION_TIME)
             throw new MarshalException("Shoud not have a TTL without an associated local deletion time");
 
-        // If cell is a tombstone, it shouldn't have a value.
-        if (isTombstone() && value().hasRemaining())
-            throw new MarshalException("A tombstone should not have a value");
+        if (isTombstone())
+        {
+            // If cell is a tombstone, it shouldn't have a value.
+            if (value().hasRemaining())
+                throw new MarshalException("A tombstone should not have a value");
+        }
+        else
+        {
+            column().validateCellValue(value());
+        }
 
         if (path() != null)
             column().validateCellPath(path());
+    }
+
+    public long maxTimestamp()
+    {
+        return timestamp();
     }
 
     @Override

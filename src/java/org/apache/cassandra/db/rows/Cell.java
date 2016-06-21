@@ -21,7 +21,7 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.Comparator;
 
-import org.apache.cassandra.config.ColumnDefinition;
+import org.apache.cassandra.config.*;
 import org.apache.cassandra.db.*;
 import org.apache.cassandra.io.util.DataOutputPlus;
 import org.apache.cassandra.io.util.DataInputPlus;
@@ -130,6 +130,8 @@ public abstract class Cell extends ColumnData
      */
     public abstract CellPath path();
 
+    public abstract Cell withUpdatedColumn(ColumnDefinition newColumn);
+
     public abstract Cell withUpdatedValue(ByteBuffer newValue);
 
     public abstract Cell copy(AbstractAllocator allocator);
@@ -229,8 +231,6 @@ public abstract class Cell extends ColumnData
                             ? column.cellPathSerializer().deserialize(in)
                             : null;
 
-            boolean isCounter = localDeletionTime == NO_DELETION_TIME && column.type.isCounter();
-
             ByteBuffer value = ByteBufferUtil.EMPTY_BYTE_BUFFER;
             if (hasValue)
             {
@@ -240,7 +240,9 @@ public abstract class Cell extends ColumnData
                 }
                 else
                 {
-                    value = header.getType(column).readValue(in);
+                    boolean isCounter = localDeletionTime == NO_DELETION_TIME && column.type.isCounter();
+
+                    value = header.getType(column).readValue(in, DatabaseDescriptor.getMaxValueSize());
                     if (isCounter)
                         value = helper.maybeClearCounterValue(value);
                 }

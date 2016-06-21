@@ -486,10 +486,10 @@ public class SecondaryIndexManager implements IndexRegistry
      */
     public void flushAllNonCFSBackedIndexesBlocking()
     {
-        Set<Index> customIndexers = indexes.values().stream()
-                                                    .filter(index -> !(index.getBackingTable().isPresent()))
-                                                    .collect(Collectors.toSet());
-        flushIndexesBlocking(customIndexers);
+        executeAllBlocking(indexes.values()
+                                  .stream()
+                                  .filter(index -> !index.getBackingTable().isPresent()),
+                           Index::getBlockingFlushTask);
     }
 
     /**
@@ -561,7 +561,7 @@ public class SecondaryIndexManager implements IndexRegistry
      * Delete all data from all indexes for this partition.
      * For when cleanup rips a partition out entirely.
      *
-     * TODO : improve cleanup transaction to batch updates & perform them async
+     * TODO : improve cleanup transaction to batch updates and perform them async
      */
     public void deletePartition(UnfilteredRowIterator partition, int nowInSec)
     {
@@ -632,7 +632,7 @@ public class SecondaryIndexManager implements IndexRegistry
                 Tracing.trace("Command contains a custom index expression, using target index {}", customExpression.getTargetIndex().name);
                 return indexes.get(customExpression.getTargetIndex().name);
             }
-            else
+            else if (!expression.isUserDefined())
             {
                 indexes.values().stream()
                        .filter(index -> index.supportsExpression(expression.column(), expression.operator()))
@@ -915,6 +915,8 @@ public class SecondaryIndexManager implements IndexRegistry
             {
                 public void onPrimaryKeyLivenessInfo(int i, Clustering clustering, LivenessInfo merged, LivenessInfo original)
                 {
+                    if (original != null && (merged == null || !merged.isLive(nowInSec)))
+                        getBuilder(i, clustering).addPrimaryKeyLivenessInfo(original);
                 }
 
                 public void onDeletion(int i, Clustering clustering, Row.Deletion merged, Row.Deletion original)
@@ -927,15 +929,18 @@ public class SecondaryIndexManager implements IndexRegistry
 
                 public void onCell(int i, Clustering clustering, Cell merged, Cell original)
                 {
-                    if (original != null && merged == null)
+                    if (original != null && (merged == null || !merged.isLive(nowInSec)))
+                        getBuilder(i, clustering).addCell(original);
+                }
+
+                private Row.Builder getBuilder(int index, Clustering clustering)
+                {
+                    if (builders[index] == null)
                     {
-                        if (builders[i] == null)
-                        {
-                            builders[i] = BTreeRow.sortedBuilder();
-                            builders[i].newRow(clustering);
-                        }
-                        builders[i].addCell(original);
+                        builders[index] = BTreeRow.sortedBuilder();
+                        builders[index].newRow(clustering);
                     }
+                    return builders[index];
                 }
             };
 

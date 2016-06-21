@@ -2504,7 +2504,23 @@ public class UFTest extends CQLTester
 
         String typeName = createType("CREATE TYPE %s (txt text, i int)");
 
-        String f = createFunction(KEYSPACE, "text",
+        createFunction(KEYSPACE, "map<text,bigint>,list<text>",
+                       "CREATE FUNCTION IF NOT EXISTS %s(state map<text,bigint>, styles list<text>)\n" +
+                       "  RETURNS NULL ON NULL INPUT\n" +
+                       "  RETURNS map<text,bigint>\n" +
+                       "  LANGUAGE java\n" +
+                       "  AS $$\n" +
+                       "    for (String style : styles) {\n" +
+                       "      if (state.containsKey(style)) {\n" +
+                       "        state.put(style, state.get(style) + 1L);\n" +
+                       "      } else {\n" +
+                       "        state.put(style, 1L);\n" +
+                       "      }\n" +
+                       "    }\n" +
+                       "    return state;\n" +
+                       "  $$");
+
+        createFunction(KEYSPACE, "text",
                                   "CREATE OR REPLACE FUNCTION %s("                 +
                                   "  listText list<text>,"                         +
                                   "  setText set<text>,"                           +
@@ -2527,6 +2543,177 @@ public class UFTest extends CQLTester
                                   "     for (com.datastax.driver.core.UDTValue u : maptexttype.values()) {};" +
                                   "     return maplisttextsetint;" +
                                   "$$");
+    }
 
+    @Test
+    public void testArgAndReturnTypes() throws Throwable
+    {
+
+        String type = KEYSPACE + '.' + createType("CREATE TYPE %s (txt text, i int)");
+
+        createTable("CREATE TABLE %s (key int primary key, udt frozen<" + type + ">)");
+        execute("INSERT INTO %s (key, udt) VALUES (1, {txt: 'foo', i: 42})");
+
+        // Java UDFs
+
+        String f = createFunction(KEYSPACE, "int",
+                                  "CREATE OR REPLACE FUNCTION %s(val int) " +
+                                  "RETURNS NULL ON NULL INPUT " +
+                                  "RETURNS " + type + ' ' +
+                                  "LANGUAGE JAVA\n" +
+                                  "AS 'return udfContext.newReturnUDTValue();';");
+
+        assertRows(execute("SELECT " + f + "(key) FROM %s"),
+                   row(userType("txt", null, "i", null)));
+
+        f = createFunction(KEYSPACE, "int",
+                           "CREATE OR REPLACE FUNCTION %s(val " + type + ") " +
+                           "RETURNS NULL ON NULL INPUT " +
+                           "RETURNS " + type + ' ' +
+                           "LANGUAGE JAVA\n" +
+                           "AS $$" +
+                           "   com.datastax.driver.core.UDTValue udt = udfContext.newArgUDTValue(\"val\");" +
+                           "   udt.setString(\"txt\", \"baz\");" +
+                           "   udt.setInt(\"i\", 88);" +
+                           "   return udt;" +
+                           "$$;");
+
+        assertRows(execute("SELECT " + f + "(udt) FROM %s"),
+                   row(userType("txt", "baz", "i", 88)));
+
+        f = createFunction(KEYSPACE, "int",
+                           "CREATE OR REPLACE FUNCTION %s(val " + type + ") " +
+                           "RETURNS NULL ON NULL INPUT " +
+                           "RETURNS tuple<text, int>" +
+                           "LANGUAGE JAVA\n" +
+                           "AS $$" +
+                           "   com.datastax.driver.core.TupleValue tv = udfContext.newReturnTupleValue();" +
+                           "   tv.setString(0, \"baz\");" +
+                           "   tv.setInt(1, 88);" +
+                           "   return tv;" +
+                           "$$;");
+
+        assertRows(execute("SELECT " + f + "(udt) FROM %s"),
+                   row(tuple("baz", 88)));
+
+        // JavaScript UDFs
+
+        f = createFunction(KEYSPACE, "int",
+                           "CREATE OR REPLACE FUNCTION %s(val int) " +
+                           "RETURNS NULL ON NULL INPUT " +
+                           "RETURNS " + type + ' ' +
+                           "LANGUAGE JAVASCRIPT\n" +
+                           "AS $$" +
+                           "   udt = udfContext.newReturnUDTValue();" +
+                           "   udt;" +
+                           "$$;");
+
+        assertRows(execute("SELECT " + f + "(key) FROM %s"),
+                   row(userType("txt", null, "i", null)));
+
+        f = createFunction(KEYSPACE, "int",
+                           "CREATE OR REPLACE FUNCTION %s(val " + type + ") " +
+                           "RETURNS NULL ON NULL INPUT " +
+                           "RETURNS " + type + ' ' +
+                           "LANGUAGE JAVASCRIPT\n" +
+                           "AS $$" +
+                           "   udt = udfContext.newArgUDTValue(0);" +
+                           "   udt.setString(\"txt\", \"baz\");" +
+                           "   udt.setInt(\"i\", 88);" +
+                           "   udt;" +
+                           "$$;");
+
+        assertRows(execute("SELECT " + f + "(udt) FROM %s"),
+                   row(userType("txt", "baz", "i", 88)));
+
+        f = createFunction(KEYSPACE, "int",
+                           "CREATE OR REPLACE FUNCTION %s(val " + type + ") " +
+                           "RETURNS NULL ON NULL INPUT " +
+                           "RETURNS tuple<text, int>" +
+                           "LANGUAGE JAVASCRIPT\n" +
+                           "AS $$" +
+                           "   tv = udfContext.newReturnTupleValue();" +
+                           "   tv.setString(0, \"baz\");" +
+                           "   tv.setInt(1, 88);" +
+                           "   tv;" +
+                           "$$;");
+
+        assertRows(execute("SELECT " + f + "(udt) FROM %s"),
+                   row(tuple("baz", 88)));
+
+        createFunction(KEYSPACE, "map",
+                       "CREATE FUNCTION %s(my_map map<text, text>)\n" +
+                       "         CALLED ON NULL INPUT\n" +
+                       "         RETURNS text\n" +
+                       "         LANGUAGE java\n" +
+                       "         AS $$\n" +
+                       "             String buffer = \"\";\n" +
+                       "             for(java.util.Map.Entry<String, String> entry: my_map.entrySet()) {\n" +
+                       "                 buffer = buffer + entry.getKey() + \": \" + entry.getValue() + \", \";\n" +
+                       "             }\n" +
+                       "             return buffer;\n" +
+                       "         $$;\n");
+    }
+
+    @Test
+    public void testImportJavaUtil() throws Throwable
+    {
+        createFunction(KEYSPACE, "list<text>",
+                "CREATE OR REPLACE FUNCTION %s(listText list<text>) "                                             +
+                        "CALLED ON NULL INPUT "                          +
+                        "RETURNS set<text> " +
+                        "LANGUAGE JAVA\n"                                +
+                        "AS $$\n" +
+                        "     Set<String> set = new HashSet<String>(); " +
+                        "     for (String s : listtext) {" +
+                        "            set.add(s);" +
+                        "     }" +
+                        "     return set;" +
+                        "$$");
+
+    }
+
+    @Test
+    public void testAnyUserTupleType() throws Throwable
+    {
+        createTable("CREATE TABLE %s (key int primary key, sval text)");
+        execute("INSERT INTO %s (key, sval) VALUES (1, 'foo')");
+
+        String udt = createType("CREATE TYPE %s (a int, b text, c bigint)");
+
+        String fUdt = createFunction(KEYSPACE, "text",
+                                     "CREATE OR REPLACE FUNCTION %s(arg text) " +
+                                     "CALLED ON NULL INPUT " +
+                                     "RETURNS " + udt + " " +
+                                     "LANGUAGE JAVA\n" +
+                                     "AS $$\n" +
+                                     "    UDTValue udt = udfContext.newUDTValue(\"" + udt + "\");" +
+                                     "    udt.setInt(\"a\", 42);" +
+                                     "    udt.setString(\"b\", \"42\");" +
+                                     "    udt.setLong(\"c\", 4242);" +
+                                     "    return udt;" +
+                                     "$$");
+
+        assertRows(execute("SELECT " + fUdt + "(sval) FROM %s"),
+                   row(userType("a", 42, "b", "42", "c", 4242L)));
+
+        String fTup = createFunction(KEYSPACE, "text",
+                                     "CREATE OR REPLACE FUNCTION %s(arg text) " +
+                                     "CALLED ON NULL INPUT " +
+                                     "RETURNS tuple<int, " + udt + "> " +
+                                     "LANGUAGE JAVA\n" +
+                                     "AS $$\n" +
+                                     "    UDTValue udt = udfContext.newUDTValue(\"" + udt + "\");" +
+                                     "    udt.setInt(\"a\", 42);" +
+                                     "    udt.setString(\"b\", \"42\");" +
+                                     "    udt.setLong(\"c\", 4242);" +
+                                     "    TupleValue tup = udfContext.newTupleValue(\"tuple<int," + udt + ">\");" +
+                                     "    tup.setInt(0, 88);" +
+                                     "    tup.setUDTValue(1, udt);" +
+                                     "    return tup;" +
+                                     "$$");
+
+        assertRows(execute("SELECT " + fTup + "(sval) FROM %s"),
+                   row(tuple(88, userType("a", 42, "b", "42", "c", 4242L))));
     }
 }

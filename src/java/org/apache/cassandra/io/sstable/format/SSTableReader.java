@@ -45,7 +45,6 @@ import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.config.Schema;
 import org.apache.cassandra.db.*;
-import org.apache.cassandra.db.commitlog.ReplayPosition;
 import org.apache.cassandra.db.filter.ColumnFilter;
 import org.apache.cassandra.db.rows.EncodingStats;
 import org.apache.cassandra.db.rows.UnfilteredRowIterator;
@@ -421,7 +420,8 @@ public abstract class SSTableReader extends SSTable implements SelfRefCounted<SS
             System.exit(1);
         }
 
-        logger.debug("Opening {} ({} bytes)", descriptor, new File(descriptor.filenameFor(Component.DATA)).length());
+        long fileLength = new File(descriptor.filenameFor(Component.DATA)).length();
+        logger.debug("Opening {} ({})", descriptor, FBUtilities.prettyPrintMemory(fileLength));
         SSTableReader sstable = internalOpen(descriptor,
                                              components,
                                              metadata,
@@ -477,7 +477,8 @@ public abstract class SSTableReader extends SSTable implements SelfRefCounted<SS
             System.exit(1);
         }
 
-        logger.debug("Opening {} ({} bytes)", descriptor, new File(descriptor.filenameFor(Component.DATA)).length());
+        long fileLength = new File(descriptor.filenameFor(Component.DATA)).length();
+        logger.debug("Opening {} ({})", descriptor, FBUtilities.prettyPrintMemory(fileLength));
         SSTableReader sstable = internalOpen(descriptor,
                                              components,
                                              metadata,
@@ -745,30 +746,8 @@ public abstract class SSTableReader extends SSTable implements SelfRefCounted<SS
 
             dfile = dbuilder.buildData(descriptor, sstableMetadata);
 
-            // Check for an index summary that was downsampled even though the serialization format doesn't support
-            // that.  If it was downsampled, rebuild it.  See CASSANDRA-8993 for details.
-        if (ifile != null && !descriptor.version.hasSamplingLevel() && !builtSummary && !validateSummarySamplingLevel())
-            {
-                indexSummary.close();
-                ifile.close();
-                dfile.close();
-
-                logger.info("Detected erroneously downsampled index summary; will rebuild summary at full sampling");
-                FileUtils.deleteWithConfirm(new File(descriptor.filenameFor(Component.SUMMARY)));
-
-                try(SegmentedFile.Builder ibuilderRebuild = SegmentedFile.getBuilder(DatabaseDescriptor.getIndexAccessMode(), false);
-                    SegmentedFile.Builder dbuilderRebuild = SegmentedFile.getBuilder(DatabaseDescriptor.getDiskAccessMode(), compression))
-                {
-                    buildSummary(false, false, Downsampling.BASE_SAMPLING_LEVEL);
-                    ifile = ibuilderRebuild.buildIndex(descriptor, indexSummary);
-                    dfile = dbuilderRebuild.buildData(descriptor, sstableMetadata);
-                    saveSummary(ibuilderRebuild, dbuilderRebuild);
-                }
-            }
-            else if (saveSummaryIfCreated && builtSummary)
-            {
+            if (saveSummaryIfCreated && builtSummary)
                 saveSummary(ibuilder, dbuilder);
-            }
         }
         catch (Throwable t)
         { // Because the tidier has not been set-up yet in SSTableReader.open(), we must release the files in case of error
@@ -821,12 +800,11 @@ public abstract class SSTableReader extends SSTable implements SelfRefCounted<SS
             try (IndexSummaryBuilder summaryBuilder = summaryLoaded ? null : new IndexSummaryBuilder(estimatedKeys, metadata.params.minIndexInterval, samplingLevel))
             {
                 long indexPosition;
-                RowIndexEntry.IndexSerializer rowIndexSerializer = descriptor.getFormat().getIndexSerializer(metadata, descriptor.version, header);
 
                 while ((indexPosition = primaryIndex.getFilePointer()) != indexSize)
                 {
                     ByteBuffer key = ByteBufferUtil.readWithShortLength(primaryIndex);
-                    /*RowIndexEntry indexEntry = */rowIndexSerializer.deserialize(primaryIndex);
+                    RowIndexEntry.Serializer.skip(primaryIndex, descriptor.version);
                     DecoratedKey decoratedKey = decorateKey(key);
                     if (first == null)
                         first = decoratedKey;
@@ -894,53 +872,6 @@ public abstract class SSTableReader extends SSTable implements SelfRefCounted<SS
         finally
         {
             FileUtils.closeQuietly(iStream);
-        }
-
-        return true;
-    }
-
-    /**
-     * Validates that an index summary has full sampling, as expected when the serialization format does not support
-     * persisting the sampling level.
-     * @return true if the summary has full sampling, false otherwise
-     */
-    private boolean validateSummarySamplingLevel()
-    {
-        // We need to check index summary entries against the index to verify that none of them were dropped due to
-        // downsampling.  Downsampling can drop any of the first BASE_SAMPLING_LEVEL entries (repeating that drop pattern
-        // for the remainder of the summary).  Unfortunately, the first entry to be dropped is the entry at
-        // index (BASE_SAMPLING_LEVEL - 1), so we need to check a full set of BASE_SAMPLING_LEVEL entries.
-        if (ifile == null)
-            return false;
-
-        int i = 0;
-        int summaryEntriesChecked = 0;
-        int expectedIndexInterval = getMinIndexInterval();
-        String path = null;
-        try (FileDataInput in = ifile.createReader(0))
-        {
-            path = in.getPath();
-            while (!in.isEOF())
-            {
-                ByteBuffer indexKey = ByteBufferUtil.readWithShortLength(in);
-                if (i % expectedIndexInterval == 0)
-                {
-                    ByteBuffer summaryKey = ByteBuffer.wrap(indexSummary.getKey(i / expectedIndexInterval));
-                    if (!summaryKey.equals(indexKey))
-                        return false;
-                    summaryEntriesChecked++;
-
-                    if (summaryEntriesChecked == Downsampling.BASE_SAMPLING_LEVEL)
-                        return true;
-                }
-                RowIndexEntry.Serializer.skip(in, descriptor.version);
-                i++;
-            }
-        }
-        catch (IOException e)
-        {
-            markSuspect();
-            throw new CorruptSSTableException(e, path);
         }
 
         return true;
@@ -1636,7 +1567,7 @@ public abstract class SSTableReader extends SSTable implements SelfRefCounted<SS
      */
     public long uncompressedLength()
     {
-        return dfile.length;
+        return dfile.dataLength();
     }
 
     /**
@@ -1761,7 +1692,7 @@ public abstract class SSTableReader extends SSTable implements SelfRefCounted<SS
     /**
      * Direct I/O SSTableScanner over an iterator of bounds.
      *
-     * @param bounds the keys to cover
+     * @param rangeIterator the keys to cover
      * @return A Scanner for seeking over the rows of the SSTable.
      */
     public abstract ISSTableScanner getScanner(Iterator<AbstractBounds<PartitionPosition>> rangeIterator);
@@ -1820,7 +1751,7 @@ public abstract class SSTableReader extends SSTable implements SelfRefCounted<SS
             // this saves index summary lookup and index file iteration which whould be pretty costly
             // especially in presence of promoted column indexes
             if (isKeyCacheSetup())
-                cacheKey(key, rowIndexEntrySerializer.deserialize(in));
+                cacheKey(key, rowIndexEntrySerializer.deserialize(in, in.getFilePointer()));
         }
 
         return key;
@@ -1905,11 +1836,6 @@ public abstract class SSTableReader extends SSTable implements SelfRefCounted<SS
     public double getCompressionRatio()
     {
         return sstableMetadata.compressionRatio;
-    }
-
-    public ReplayPosition getReplayPosition()
-    {
-        return sstableMetadata.replayPosition;
     }
 
     public long getMinTimestamp()
@@ -2017,6 +1943,11 @@ public abstract class SSTableReader extends SSTable implements SelfRefCounted<SS
     public ChannelProxy getIndexChannel()
     {
         return ifile.channel;
+    }
+
+    public SegmentedFile getIndexFile()
+    {
+        return ifile;
     }
 
     /**

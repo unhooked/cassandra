@@ -1,7 +1,28 @@
+/*
+ *
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ */
 package org.apache.cassandra.index;
 
 import java.util.*;
 import java.util.concurrent.Callable;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 
@@ -51,6 +72,17 @@ public class CustomIndexTest extends CQLTester
         execute("INSERT INTO %s (a, b, c, d) VALUES (?, ?, ?, ?)", 0, 0, 0, 2);
         execute("INSERT INTO %s (a, b, c, d) VALUES (?, ?, ?, ?)", 0, 1, 0, 1);
         execute("INSERT INTO %s (a, b, c, d) VALUES (?, ?, ?, ?)", 0, 2, 0, 0);
+    }
+
+    @Test
+    public void testTruncateWithNonCfsCustomIndex() throws Throwable
+    {
+        // deadlocks and times out the test in the face of the synchronisation
+        // issues described in the comments on CASSANDRA-9669
+        createTable("CREATE TABLE %s (a int, b int, c int, PRIMARY KEY (a))");
+        createIndex("CREATE CUSTOM INDEX b_index ON %s(b) USING 'org.apache.cassandra.index.StubIndex'");
+        execute("INSERT INTO %s (a, b, c) VALUES (?, ?, ?)", 0, 1, 2);
+        getCurrentColumnFamilyStore().truncateBlocking();
     }
 
     @Test
@@ -392,30 +424,34 @@ public class CustomIndexTest extends CQLTester
     public void customExpressionsDisallowedInModifications() throws Throwable
     {
         createTable("CREATE TABLE %s (a int, b int, c int, d int, PRIMARY KEY (a, b))");
-        createIndex(String.format("CREATE CUSTOM INDEX custom_index ON %%s(c) USING '%s'", StubIndex.class.getName()));
+        String indexName = currentTable() + "_custom_index";
+        createIndex(String.format("CREATE CUSTOM INDEX %s ON %%s(c) USING '%s'",
+                                  indexName, StubIndex.class.getName()));
 
         assertInvalidThrowMessage(Server.CURRENT_VERSION,
                                   ModificationStatement.CUSTOM_EXPRESSIONS_NOT_ALLOWED,
                                   QueryValidationException.class,
-                                  "DELETE FROM %s WHERE expr(custom_index, 'foo bar baz ')");
+                                  String.format("DELETE FROM %%s WHERE expr(%s, 'foo bar baz ')", indexName));
         assertInvalidThrowMessage(Server.CURRENT_VERSION,
                                   ModificationStatement.CUSTOM_EXPRESSIONS_NOT_ALLOWED,
                                   QueryValidationException.class,
-                                  "UPDATE %s SET d=0 WHERE expr(custom_index, 'foo bar baz ')");
+                                  String.format("UPDATE %%s SET d=0 WHERE expr(%s, 'foo bar baz ')", indexName));
     }
 
     @Test
     public void indexSelectionPrefersMostSelectiveIndex() throws Throwable
     {
         createTable("CREATE TABLE %s(a int, b int, c int, PRIMARY KEY (a))");
-        createIndex(String.format("CREATE CUSTOM INDEX more_selective ON %%s(b) USING '%s'",
+        createIndex(String.format("CREATE CUSTOM INDEX %s_more_selective ON %%s(b) USING '%s'",
+                                  currentTable(),
                                   SettableSelectivityIndex.class.getName()));
-        createIndex(String.format("CREATE CUSTOM INDEX less_selective ON %%s(c) USING '%s'",
+        createIndex(String.format("CREATE CUSTOM INDEX %s_less_selective ON %%s(c) USING '%s'",
+                                  currentTable(),
                                   SettableSelectivityIndex.class.getName()));
         SettableSelectivityIndex moreSelective =
-            (SettableSelectivityIndex)getCurrentColumnFamilyStore().indexManager.getIndexByName("more_selective");
+            (SettableSelectivityIndex)getCurrentColumnFamilyStore().indexManager.getIndexByName(currentTable() + "_more_selective");
         SettableSelectivityIndex lessSelective =
-            (SettableSelectivityIndex)getCurrentColumnFamilyStore().indexManager.getIndexByName("less_selective");
+            (SettableSelectivityIndex)getCurrentColumnFamilyStore().indexManager.getIndexByName(currentTable() + "_less_selective");
         assertEquals(0, moreSelective.searchersProvided);
         assertEquals(0, lessSelective.searchersProvided);
 
@@ -437,14 +473,16 @@ public class CustomIndexTest extends CQLTester
     public void customExpressionForcesIndexSelection() throws Throwable
     {
         createTable("CREATE TABLE %s(a int, b int, c int, PRIMARY KEY (a))");
-        createIndex(String.format("CREATE CUSTOM INDEX more_selective ON %%s(b) USING '%s'",
+        createIndex(String.format("CREATE CUSTOM INDEX %s_more_selective ON %%s(b) USING '%s'",
+                                  currentTable(),
                                   SettableSelectivityIndex.class.getName()));
-        createIndex(String.format("CREATE CUSTOM INDEX less_selective ON %%s(c) USING '%s'",
+        createIndex(String.format("CREATE CUSTOM INDEX %s_less_selective ON %%s(c) USING '%s'",
+                                  currentTable(),
                                   SettableSelectivityIndex.class.getName()));
         SettableSelectivityIndex moreSelective =
-            (SettableSelectivityIndex)getCurrentColumnFamilyStore().indexManager.getIndexByName("more_selective");
+            (SettableSelectivityIndex)getCurrentColumnFamilyStore().indexManager.getIndexByName(currentTable() + "_more_selective");
         SettableSelectivityIndex lessSelective =
-            (SettableSelectivityIndex)getCurrentColumnFamilyStore().indexManager.getIndexByName("less_selective");
+            (SettableSelectivityIndex)getCurrentColumnFamilyStore().indexManager.getIndexByName(currentTable() + "_less_selective");
         assertEquals(0, moreSelective.searchersProvided);
         assertEquals(0, lessSelective.searchersProvided);
 
@@ -456,7 +494,7 @@ public class CustomIndexTest extends CQLTester
         assertEquals(0, lessSelective.searchersProvided);
 
         // when a custom expression is present, its target index should be preferred
-        execute("SELECT * FROM %s WHERE b=0 AND expr(less_selective, 'expression') ALLOW FILTERING");
+        execute(String.format("SELECT * FROM %%s WHERE b=0 AND expr(%s_less_selective, 'expression') ALLOW FILTERING", currentTable()));
         assertEquals(1, moreSelective.searchersProvided);
         assertEquals(1, lessSelective.searchersProvided);
     }
@@ -528,6 +566,32 @@ public class CustomIndexTest extends CQLTester
         assertEquals(3, index.rowsDeleted.size());
         for (int i = 0; i < 3; i++)
             assertEquals(index.rowsDeleted.get(i).clustering(), index.rowsInserted.get(i).clustering());
+    }
+
+    @Test
+    public void notifyIndexersOfExpiredRowsDuringCompaction() throws Throwable
+    {
+        createTable("CREATE TABLE %s (k int, c int, PRIMARY KEY (k,c))");
+        createIndex(String.format("CREATE CUSTOM INDEX row_ttl_test_index ON %%s() USING '%s'", StubIndex.class.getName()));
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        StubIndex index  = (StubIndex)cfs.indexManager.getIndexByName("row_ttl_test_index");
+
+        execute("INSERT INTO %s (k, c) VALUES (?, ?) USING TTL 1", 0, 0);
+        execute("INSERT INTO %s (k, c) VALUES (?, ?)", 0, 1);
+        execute("INSERT INTO %s (k, c) VALUES (?, ?)", 0, 2);
+        execute("INSERT INTO %s (k, c) VALUES (?, ?)", 3, 3);
+        assertEquals(4, index.rowsInserted.size());
+        // flush so that we end up with an expiring row in the first sstable
+        flush();
+
+        // let the row with the ttl expire, then force a compaction
+        TimeUnit.SECONDS.sleep(2);
+        compact();
+
+        // the index should have been notified of the expired row
+        assertEquals(1, index.rowsDeleted.size());
+        Integer deletedClustering = Int32Type.instance.compose(index.rowsDeleted.get(0).clustering().get(0));
+        assertEquals(0, deletedClustering.intValue());
     }
 
     @Test

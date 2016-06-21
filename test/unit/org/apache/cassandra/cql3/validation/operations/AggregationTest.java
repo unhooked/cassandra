@@ -18,6 +18,8 @@
 package org.apache.cassandra.cql3.validation.operations;
 
 import java.math.BigDecimal;
+import java.math.MathContext;
+import java.math.RoundingMode;
 import java.nio.ByteBuffer;
 import java.text.SimpleDateFormat;
 import java.util.Arrays;
@@ -146,9 +148,6 @@ public class AggregationTest extends CQLTester
         assertColumnNames(execute("SELECT COUNT(1) as myCount FROM %s"), "mycount");
         assertRows(execute("SELECT COUNT(1) as myCount FROM %s"), row(0L));
 
-        // Test invalid call
-        assertInvalidSyntaxMessage("Only COUNT(1) is supported, got COUNT(2)", "SELECT COUNT(2) FROM %s");
-
         // Test with other aggregates
         assertColumnNames(execute("SELECT COUNT(*), max(b), b FROM %s"), "count", "system.max(b)", "b");
         assertRows(execute("SELECT COUNT(*), max(b), b  FROM %s"), row(0L, null, null));
@@ -248,7 +247,7 @@ public class AggregationTest extends CQLTester
         assertRows(execute("SELECT count(b.x), max(b.x) as max, b.x, c.x as first FROM %s"),
                    row(3L, 8, 2, null));
 
-        assertInvalidMessage("Invalid field selection: max(b) of type blob is not a user type",
+        assertInvalidMessage("Invalid field selection: system.max(b) of type blob is not a user type",
                              "SELECT max(b).x as max FROM %s");
     }
 
@@ -351,7 +350,6 @@ public class AggregationTest extends CQLTester
 
         assertInvalidSyntax("SELECT max(b), max(c) FROM %s WHERE max(a) = 1");
         assertInvalidMessage("aggregate functions cannot be used as arguments of aggregate functions", "SELECT max(sum(c)) FROM %s");
-        assertInvalidSyntax("SELECT COUNT(2) FROM %s");
     }
 
     @Test
@@ -1950,5 +1948,22 @@ public class AggregationTest extends CQLTester
             {
             }
         }
+    }
+
+    @Test
+    public void testArithmeticCorrectness() throws Throwable
+    {
+        createTable("create table %s (bucket int primary key, val decimal)");
+        execute("insert into %s (bucket, val) values (1, 0.25)");
+        execute("insert into %s (bucket, val) values (2, 0.25)");
+        execute("insert into %s (bucket, val) values (3, 0.5);");
+
+        BigDecimal a = new BigDecimal("0.25");
+        a = a.add(new BigDecimal("0.25"));
+        a = a.add(new BigDecimal("0.5"));
+        a = a.divide(new BigDecimal(3), RoundingMode.HALF_EVEN);
+
+        assertRows(execute("select avg(val) from %s where bucket in (1, 2, 3);"),
+                   row(a));
     }
 }

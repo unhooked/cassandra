@@ -39,6 +39,7 @@ import org.apache.cassandra.db.rows.Cell;
 import org.apache.cassandra.db.rows.Row;
 import org.apache.cassandra.index.sasi.analyzer.AbstractAnalyzer;
 import org.apache.cassandra.index.sasi.conf.view.View;
+import org.apache.cassandra.index.sasi.disk.OnDiskIndexBuilder;
 import org.apache.cassandra.index.sasi.disk.Token;
 import org.apache.cassandra.index.sasi.memory.IndexMemtable;
 import org.apache.cassandra.index.sasi.plan.Expression;
@@ -212,20 +213,32 @@ public class ColumnIndex
 
     public boolean supports(Operator op)
     {
+        if (op == Operator.LIKE)
+            return isLiteral();
+
         Op operator = Op.valueOf(op);
         return !(isTokenized && operator == Op.EQ) // EQ is only applicable to non-tokenized indexes
-            && !(isLiteral() && operator == Op.RANGE) // RANGE only applicable to indexes non-literal indexes
-            && mode.supports(operator); // for all other cases let's refer to index itself
+               && !(isTokenized && mode.mode == OnDiskIndexBuilder.Mode.CONTAINS && operator == Op.PREFIX) // PREFIX not supported on tokenized CONTAINS mode indexes
+               && !(isLiteral() && operator == Op.RANGE) // RANGE only applicable to indexes non-literal indexes
+               && mode.supports(operator); // for all other cases let's refer to index itself
 
     }
 
     public static ByteBuffer getValueOf(ColumnDefinition column, Row row, int nowInSecs)
     {
+        if (row == null)
+            return null;
+
         switch (column.kind)
         {
             case CLUSTERING:
                 return row.clustering().get(column.position());
 
+            // treat static cell retrieval the same was as regular
+            // only if row kind is STATIC otherwise return null
+            case STATIC:
+                if (!row.isStatic())
+                    return null;
             case REGULAR:
                 Cell cell = row.getCell(column);
                 return cell == null || !cell.isLive(nowInSecs) ? null : cell.value();

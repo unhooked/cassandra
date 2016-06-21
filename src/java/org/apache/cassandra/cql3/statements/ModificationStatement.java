@@ -27,9 +27,9 @@ import org.slf4j.LoggerFactory;
 import org.apache.cassandra.auth.Permission;
 import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.config.ColumnDefinition;
+import org.apache.cassandra.config.ColumnDefinition.Raw;
 import org.apache.cassandra.config.ViewDefinition;
 import org.apache.cassandra.cql3.*;
-import org.apache.cassandra.cql3.ColumnIdentifier.Raw;
 import org.apache.cassandra.cql3.functions.Function;
 import org.apache.cassandra.cql3.restrictions.StatementRestrictions;
 import org.apache.cassandra.cql3.selection.Selection;
@@ -141,10 +141,25 @@ public abstract class ModificationStatement implements CQLStatement
 
     public Iterable<Function> getFunctions()
     {
-        return Iterables.concat(attrs.getFunctions(),
-                                restrictions.getFunctions(),
-                                operations.getFunctions(),
-                                conditions.getFunctions());
+        List<Function> functions = new ArrayList<>();
+        addFunctionsTo(functions);
+        return functions;
+    }
+
+    public void addFunctionsTo(List<Function> functions)
+    {
+        attrs.addFunctionsTo(functions);
+        restrictions.addFunctionsTo(functions);
+        operations.addFunctionsTo(functions);
+        conditions.addFunctionsTo(functions);
+    }
+
+    /*
+     * May be used by QueryHandler implementations
+     */
+    public StatementRestrictions getRestrictions()
+    {
+        return restrictions;
     }
 
     public abstract void addUpdateForKey(PartitionUpdate update, Clustering clustering, UpdateParameters params);
@@ -534,10 +549,10 @@ public abstract class ModificationStatement implements CQLStatement
 
         }
 
-        Selection.ResultSetBuilder builder = selection.resultSetBuilder(false);
+        Selection.ResultSetBuilder builder = selection.resultSetBuilder(options, false);
         SelectStatement.forSelection(cfm, selection).processPartition(partition, options, builder, FBUtilities.nowInSeconds());
 
-        return builder.build(options.getProtocolVersion());
+        return builder.build();
     }
 
     public ResultMessage executeInternal(QueryState queryState, QueryOptions options) throws RequestValidationException, RequestExecutionException
@@ -666,8 +681,8 @@ public abstract class ModificationStatement implements CQLStatement
 
     private Slices createSlice(QueryOptions options)
     {
-        SortedSet<Slice.Bound> startBounds = restrictions.getClusteringColumnsBounds(Bound.START, options);
-        SortedSet<Slice.Bound> endBounds = restrictions.getClusteringColumnsBounds(Bound.END, options);
+        SortedSet<ClusteringBound> startBounds = restrictions.getClusteringColumnsBounds(Bound.START, options);
+        SortedSet<ClusteringBound> endBounds = restrictions.getClusteringColumnsBounds(Bound.END, options);
 
         return toSlices(startBounds, endBounds);
     }
@@ -706,14 +721,14 @@ public abstract class ModificationStatement implements CQLStatement
         return new UpdateParameters(cfm, updatedColumns(), options, getTimestamp(now, options), getTimeToLive(options), lists);
     }
 
-    private Slices toSlices(SortedSet<Slice.Bound> startBounds, SortedSet<Slice.Bound> endBounds)
+    private Slices toSlices(SortedSet<ClusteringBound> startBounds, SortedSet<ClusteringBound> endBounds)
     {
         assert startBounds.size() == endBounds.size();
 
         Slices.Builder builder = new Slices.Builder(cfm.comparator);
 
-        Iterator<Slice.Bound> starts = startBounds.iterator();
-        Iterator<Slice.Bound> ends = endBounds.iterator();
+        Iterator<ClusteringBound> starts = startBounds.iterator();
+        Iterator<ClusteringBound> ends = endBounds.iterator();
 
         while (starts.hasNext())
         {
@@ -731,21 +746,21 @@ public abstract class ModificationStatement implements CQLStatement
     {
         protected final StatementType type;
         private final Attributes.Raw attrs;
-        private final List<Pair<ColumnIdentifier.Raw, ColumnCondition.Raw>> conditions;
+        private final List<Pair<ColumnDefinition.Raw, ColumnCondition.Raw>> conditions;
         private final boolean ifNotExists;
         private final boolean ifExists;
 
         protected Parsed(CFName name,
                          StatementType type,
                          Attributes.Raw attrs,
-                         List<Pair<ColumnIdentifier.Raw, ColumnCondition.Raw>> conditions,
+                         List<Pair<ColumnDefinition.Raw, ColumnCondition.Raw>> conditions,
                          boolean ifNotExists,
                          boolean ifExists)
         {
             super(name);
             this.type = type;
             this.attrs = attrs;
-            this.conditions = conditions == null ? Collections.<Pair<ColumnIdentifier.Raw, ColumnCondition.Raw>>emptyList() : conditions;
+            this.conditions = conditions == null ? Collections.<Pair<ColumnDefinition.Raw, ColumnCondition.Raw>>emptyList() : conditions;
             this.ifNotExists = ifNotExists;
             this.ifExists = ifExists;
         }
@@ -817,16 +832,13 @@ public abstract class ModificationStatement implements CQLStatement
 
             ColumnConditions.Builder builder = ColumnConditions.newBuilder();
 
-            for (Pair<ColumnIdentifier.Raw, ColumnCondition.Raw> entry : conditions)
+            for (Pair<ColumnDefinition.Raw, ColumnCondition.Raw> entry : conditions)
             {
-                ColumnIdentifier id = entry.left.prepare(metadata);
-                ColumnDefinition def = metadata.getColumnDefinition(id);
-                checkNotNull(metadata.getColumnDefinition(id), "Unknown identifier %s in IF conditions", id);
-
-                ColumnCondition condition = entry.right.prepare(keyspace(), def);
+                ColumnDefinition def = entry.left.prepare(metadata);
+                ColumnCondition condition = entry.right.prepare(keyspace(), def, metadata);
                 condition.collectMarkerSpecification(boundNames);
 
-                checkFalse(def.isPrimaryKeyColumn(), "PRIMARY KEY column '%s' cannot have IF conditions", id);
+                checkFalse(def.isPrimaryKeyColumn(), "PRIMARY KEY column '%s' cannot have IF conditions", def.name);
                 builder.add(condition);
             }
             return builder.build();
@@ -869,8 +881,7 @@ public abstract class ModificationStatement implements CQLStatement
          */
         protected static ColumnDefinition getColumnDefinition(CFMetaData cfm, Raw rawId)
         {
-            ColumnIdentifier id = rawId.prepare(cfm);
-            return checkNotNull(cfm.getColumnDefinition(id), "Unknown identifier %s", id);
+            return rawId.prepare(cfm);
         }
     }
 }

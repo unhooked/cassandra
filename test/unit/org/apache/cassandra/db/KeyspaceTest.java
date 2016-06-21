@@ -251,12 +251,12 @@ public class KeyspaceTest extends CQLTester
 
     private static ClusteringIndexSliceFilter slices(ColumnFamilyStore cfs, Integer sliceStart, Integer sliceEnd, boolean reversed)
     {
-        Slice.Bound startBound = sliceStart == null
-                               ? Slice.Bound.BOTTOM
-                               : Slice.Bound.create(ClusteringPrefix.Kind.INCL_START_BOUND, new ByteBuffer[]{ByteBufferUtil.bytes(sliceStart)});
-        Slice.Bound endBound = sliceEnd == null
-                             ? Slice.Bound.TOP
-                             : Slice.Bound.create(ClusteringPrefix.Kind.INCL_END_BOUND, new ByteBuffer[]{ByteBufferUtil.bytes(sliceEnd)});
+        ClusteringBound startBound = sliceStart == null
+                                   ? ClusteringBound.BOTTOM
+                                   : ClusteringBound.create(ClusteringPrefix.Kind.INCL_START_BOUND, new ByteBuffer[]{ByteBufferUtil.bytes(sliceStart)});
+        ClusteringBound endBound = sliceEnd == null
+                                 ? ClusteringBound.TOP
+                                 : ClusteringBound.create(ClusteringPrefix.Kind.INCL_END_BOUND, new ByteBuffer[]{ByteBufferUtil.bytes(sliceEnd)});
         Slices slices = Slices.with(cfs.getComparator(), Slice.make(startBound, endBound));
         return new ClusteringIndexSliceFilter(slices, reversed);
     }
@@ -390,7 +390,7 @@ public class KeyspaceTest extends CQLTester
         // verify that we do indeed have multiple index entries
         SSTableReader sstable = cfs.getLiveSSTables().iterator().next();
         RowIndexEntry indexEntry = sstable.getPosition(Util.dk("0"), SSTableReader.Operator.EQ);
-        assert indexEntry.columnsIndex().size() > 2;
+        assert indexEntry.columnsIndexCount() > 2;
 
         validateSliceLarge(cfs);
     }

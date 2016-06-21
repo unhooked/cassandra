@@ -41,7 +41,7 @@ import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.cql3.QueryProcessor;
 import org.apache.cassandra.cql3.UntypedResultSet;
 import org.apache.cassandra.cql3.functions.*;
-import org.apache.cassandra.db.commitlog.ReplayPosition;
+import org.apache.cassandra.db.commitlog.CommitLogPosition;
 import org.apache.cassandra.db.compaction.CompactionHistoryTabularData;
 import org.apache.cassandra.db.marshal.*;
 import org.apache.cassandra.db.partitions.PartitionUpdate;
@@ -262,6 +262,7 @@ public final class SystemKeyspace
                 "CREATE TABLE %s ("
                 + "keyspace_name text,"
                 + "view_name text,"
+                + "status_replicated boolean,"
                 + "PRIMARY KEY ((keyspace_name), view_name))");
 
     @Deprecated
@@ -454,7 +455,7 @@ public final class SystemKeyspace
                         .build();
     }
 
-    private static volatile Map<UUID, Pair<ReplayPosition, Long>> truncationRecords;
+    private static volatile Map<UUID, Pair<CommitLogPosition, Long>> truncationRecords;
 
     public enum BootstrapState
     {
@@ -466,11 +467,10 @@ public final class SystemKeyspace
 
     public static void finishStartup()
     {
-        persistLocalMetadata();
         SchemaKeyspace.saveSystemKeyspacesSchema();
     }
 
-    private static void persistLocalMetadata()
+    public static void persistLocalMetadata()
     {
         String req = "INSERT INTO system.%s (" +
                      "key," +
@@ -536,13 +536,23 @@ public final class SystemKeyspace
         return !result.isEmpty();
     }
 
-    public static void setViewBuilt(String keyspaceName, String viewName)
+    public static boolean isViewStatusReplicated(String keyspaceName, String viewName)
     {
-        String req = "INSERT INTO %s.\"%s\" (keyspace_name, view_name) VALUES (?, ?)";
-        executeInternal(String.format(req, NAME, BUILT_VIEWS), keyspaceName, viewName);
-        forceBlockingFlush(BUILT_VIEWS);
+        String req = "SELECT status_replicated FROM %s.\"%s\" WHERE keyspace_name=? AND view_name=?";
+        UntypedResultSet result = executeInternal(String.format(req, NAME, BUILT_VIEWS), keyspaceName, viewName);
+
+        if (result.isEmpty())
+            return false;
+        UntypedResultSet.Row row = result.one();
+        return row.has("status_replicated") && row.getBoolean("status_replicated");
     }
 
+    public static void setViewBuilt(String keyspaceName, String viewName, boolean replicated)
+    {
+        String req = "INSERT INTO %s.\"%s\" (keyspace_name, view_name, status_replicated) VALUES (?, ?, ?)";
+        executeInternal(String.format(req, NAME, BUILT_VIEWS), keyspaceName, viewName, replicated);
+        forceBlockingFlush(BUILT_VIEWS);
+    }
 
     public static void setViewRemoved(String keyspaceName, String viewName)
     {
@@ -568,12 +578,16 @@ public final class SystemKeyspace
         // We flush the view built first, because if we fail now, we'll restart at the last place we checkpointed
         // view build.
         // If we flush the delete first, we'll have to restart from the beginning.
-        // Also, if the build succeeded, but the view build failed, we will be able to skip the view build check
-        // next boot.
-        setViewBuilt(ksname, viewName);
-        forceBlockingFlush(BUILT_VIEWS);
+        // Also, if writing to the built_view succeeds, but the view_builds_in_progress deletion fails, we will be able
+        // to skip the view build next boot.
+        setViewBuilt(ksname, viewName, false);
         executeInternal(String.format("DELETE FROM system.%s WHERE keyspace_name = ? AND view_name = ?", VIEWS_BUILDS_IN_PROGRESS), ksname, viewName);
         forceBlockingFlush(VIEWS_BUILDS_IN_PROGRESS);
+    }
+
+    public static void setViewBuiltReplicated(String ksname, String viewName)
+    {
+        setViewBuilt(ksname, viewName, true);
     }
 
     public static void updateViewBuildStatus(String ksname, String viewName, Token token)
@@ -605,7 +619,7 @@ public final class SystemKeyspace
         return Pair.create(generation, lastKey);
     }
 
-    public static synchronized void saveTruncationRecord(ColumnFamilyStore cfs, long truncatedAt, ReplayPosition position)
+    public static synchronized void saveTruncationRecord(ColumnFamilyStore cfs, long truncatedAt, CommitLogPosition position)
     {
         String req = "UPDATE system.%s SET truncated_at = truncated_at + ? WHERE key = '%s'";
         executeInternal(String.format(req, LOCAL, LOCAL), truncationAsMapEntry(cfs, truncatedAt, position));
@@ -624,44 +638,49 @@ public final class SystemKeyspace
         forceBlockingFlush(LOCAL);
     }
 
-    private static Map<UUID, ByteBuffer> truncationAsMapEntry(ColumnFamilyStore cfs, long truncatedAt, ReplayPosition position)
+    private static Map<UUID, ByteBuffer> truncationAsMapEntry(ColumnFamilyStore cfs, long truncatedAt, CommitLogPosition position)
     {
-        try (DataOutputBuffer out = new DataOutputBuffer())
+        DataOutputBuffer out = null;
+        try (DataOutputBuffer ignored = out = DataOutputBuffer.RECYCLER.get())
         {
-            ReplayPosition.serializer.serialize(position, out);
+            CommitLogPosition.serializer.serialize(position, out);
             out.writeLong(truncatedAt);
-            return singletonMap(cfs.metadata.cfId, ByteBuffer.wrap(out.getData(), 0, out.getLength()));
+            return singletonMap(cfs.metadata.cfId, out.asNewBuffer());
         }
         catch (IOException e)
         {
             throw new RuntimeException(e);
         }
+        finally
+        {
+            out.recycle();
+        }
     }
 
-    public static ReplayPosition getTruncatedPosition(UUID cfId)
+    public static CommitLogPosition getTruncatedPosition(UUID cfId)
     {
-        Pair<ReplayPosition, Long> record = getTruncationRecord(cfId);
+        Pair<CommitLogPosition, Long> record = getTruncationRecord(cfId);
         return record == null ? null : record.left;
     }
 
     public static long getTruncatedAt(UUID cfId)
     {
-        Pair<ReplayPosition, Long> record = getTruncationRecord(cfId);
+        Pair<CommitLogPosition, Long> record = getTruncationRecord(cfId);
         return record == null ? Long.MIN_VALUE : record.right;
     }
 
-    private static synchronized Pair<ReplayPosition, Long> getTruncationRecord(UUID cfId)
+    private static synchronized Pair<CommitLogPosition, Long> getTruncationRecord(UUID cfId)
     {
         if (truncationRecords == null)
             truncationRecords = readTruncationRecords();
         return truncationRecords.get(cfId);
     }
 
-    private static Map<UUID, Pair<ReplayPosition, Long>> readTruncationRecords()
+    private static Map<UUID, Pair<CommitLogPosition, Long>> readTruncationRecords()
     {
         UntypedResultSet rows = executeInternal(String.format("SELECT truncated_at FROM system.%s WHERE key = '%s'", LOCAL, LOCAL));
 
-        Map<UUID, Pair<ReplayPosition, Long>> records = new HashMap<>();
+        Map<UUID, Pair<CommitLogPosition, Long>> records = new HashMap<>();
 
         if (!rows.isEmpty() && rows.one().has("truncated_at"))
         {
@@ -673,11 +692,11 @@ public final class SystemKeyspace
         return records;
     }
 
-    private static Pair<ReplayPosition, Long> truncationRecordFromBlob(ByteBuffer bytes)
+    private static Pair<CommitLogPosition, Long> truncationRecordFromBlob(ByteBuffer bytes)
     {
         try (RebufferingInputStream in = new DataInputBuffer(bytes, true))
         {
-            return Pair.create(ReplayPosition.serializer.deserialize(in), in.available() > 0 ? in.readLong() : Long.MIN_VALUE);
+            return Pair.create(CommitLogPosition.serializer.deserialize(in), in.available() > 0 ? in.readLong() : Long.MIN_VALUE);
         }
         catch (IOException e)
         {

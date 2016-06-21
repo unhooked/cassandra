@@ -17,6 +17,7 @@
  */
 package org.apache.cassandra.db;
 
+import java.util.Collections;
 import java.util.Iterator;
 
 import com.google.common.base.Objects;
@@ -151,12 +152,12 @@ public class MutableDeletionInfo implements DeletionInfo
     // Use sparingly, not the most efficient thing
     public Iterator<RangeTombstone> rangeIterator(boolean reversed)
     {
-        return ranges == null ? Iterators.<RangeTombstone>emptyIterator() : ranges.iterator(reversed);
+        return ranges == null ? Collections.emptyIterator() : ranges.iterator(reversed);
     }
 
     public Iterator<RangeTombstone> rangeIterator(Slice slice, boolean reversed)
     {
-        return ranges == null ? Iterators.<RangeTombstone>emptyIterator() : ranges.iterator(slice, reversed);
+        return ranges == null ? Collections.emptyIterator() : ranges.iterator(slice, reversed);
     }
 
     public RangeTombstone rangeCovering(Clustering name)
@@ -290,8 +291,8 @@ public class MutableDeletionInfo implements DeletionInfo
                 DeletionTime openDeletion = openMarker.openDeletionTime(reversed);
                 assert marker.closeDeletionTime(reversed).equals(openDeletion);
 
-                Slice.Bound open = openMarker.openBound(reversed);
-                Slice.Bound close = marker.closeBound(reversed);
+                ClusteringBound open = openMarker.openBound(reversed);
+                ClusteringBound close = marker.closeBound(reversed);
 
                 Slice slice = reversed ? Slice.make(close, open) : Slice.make(open, close);
                 deletion.add(new RangeTombstone(slice, openDeletion), comparator);

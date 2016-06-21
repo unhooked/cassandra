@@ -20,7 +20,7 @@ public class TimingIntervals
         this.intervals = intervals;
     }
 
-    public TimingIntervals merge(TimingIntervals with, int maxSamples, long start)
+    public TimingIntervals merge(TimingIntervals with, long start)
     {
         assert intervals.size() == with.intervals.size();
         TreeMap<String, TimingInterval> ret = new TreeMap<>();
@@ -28,7 +28,7 @@ public class TimingIntervals
         for (String opType : intervals.keySet())
         {
             assert with.intervals.containsKey(opType);
-            ret.put(opType, TimingInterval.merge(Arrays.asList(intervals.get(opType), with.intervals.get(opType)), maxSamples, start));
+            ret.put(opType, TimingInterval.merge(Arrays.asList(intervals.get(opType), with.intervals.get(opType)), start));
         }
 
         return new TimingIntervals(ret);
@@ -39,29 +39,34 @@ public class TimingIntervals
         return intervals.get(opType);
     }
 
-    public TimingInterval combine(int maxSamples)
+    public TimingInterval combine()
     {
         long start = Long.MAX_VALUE;
         for (TimingInterval ti : intervals.values())
             start = Math.min(start, ti.startNanos());
 
-        return TimingInterval.merge(intervals.values(), maxSamples, start);
+        return TimingInterval.merge(intervals.values(), start);
     }
 
-    public String str(TimingInterval.TimingParameter value)
+    public String str(TimingInterval.TimingParameter value, String unit)
     {
-        return str(value, Float.NaN);
+        return str(value, Double.NaN, unit);
     }
 
-    public String str(TimingInterval.TimingParameter value, float rank)
+    public String str(TimingInterval.TimingParameter value, double rank, String unit)
     {
         StringBuilder sb = new StringBuilder("[");
 
         for (Map.Entry<String, TimingInterval> entry : intervals.entrySet())
         {
             sb.append(entry.getKey());
-            sb.append(":");
+            sb.append(": ");
             sb.append(entry.getValue().getStringValue(value, rank));
+            if (unit.length() > 0)
+            {
+                sb.append(" ");
+                sb.append(unit);
+            }
             sb.append(", ");
         }
 
@@ -73,39 +78,47 @@ public class TimingIntervals
 
     public String opRates()
     {
-        return str(TimingInterval.TimingParameter.OPRATE);
+        return str(TimingInterval.TimingParameter.OPRATE, "op/s");
     }
+
     public String partitionRates()
     {
-        return str(TimingInterval.TimingParameter.PARTITIONRATE);
+        return str(TimingInterval.TimingParameter.PARTITIONRATE, "pk/s");
     }
+
     public String rowRates()
     {
-        return str(TimingInterval.TimingParameter.ROWRATE);
+        return str(TimingInterval.TimingParameter.ROWRATE, "row/s");
     }
+
     public String meanLatencies()
     {
-        return str(TimingInterval.TimingParameter.MEANLATENCY);
+        return str(TimingInterval.TimingParameter.MEANLATENCY, "ms");
     }
+
     public String maxLatencies()
     {
-        return str(TimingInterval.TimingParameter.MAXLATENCY);
+        return str(TimingInterval.TimingParameter.MAXLATENCY, "ms");
     }
+
     public String medianLatencies()
     {
-        return str(TimingInterval.TimingParameter.MEDIANLATENCY);
+        return str(TimingInterval.TimingParameter.MEDIANLATENCY, "ms");
     }
-    public String rankLatencies(float rank)
+
+    public String latenciesAtPercentile(double rank)
     {
-        return str(TimingInterval.TimingParameter.RANKLATENCY, rank);
+        return str(TimingInterval.TimingParameter.RANKLATENCY, rank, "ms");
     }
+
     public String errorCounts()
     {
-        return str(TimingInterval.TimingParameter.ERRORCOUNT);
+        return str(TimingInterval.TimingParameter.ERRORCOUNT, "");
     }
+
     public String partitionCounts()
     {
-        return str(TimingInterval.TimingParameter.PARTITIONCOUNT);
+        return str(TimingInterval.TimingParameter.PARTITIONCOUNT, "");
     }
 
     public long opRate()

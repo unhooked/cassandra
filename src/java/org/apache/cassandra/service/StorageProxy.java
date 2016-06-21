@@ -1280,7 +1280,8 @@ public class StorageProxy implements StorageProxyMBean
         InetAddress target = iter.next();
 
         // Add the other destinations of the same message as a FORWARD_HEADER entry
-        try (DataOutputBuffer out = new DataOutputBuffer())
+        DataOutputBuffer out = null;
+        try (DataOutputBuffer ignored = out = DataOutputBuffer.RECYCLER.get())
         {
             out.writeInt(targets.size() - 1);
             while (iter.hasNext())
@@ -1305,6 +1306,10 @@ public class StorageProxy implements StorageProxyMBean
         {
             // DataOutputBuffer is in-memory, doesn't throw IOException
             throw new AssertionError(e);
+        }
+        finally
+        {
+            out.recycle();
         }
     }
 
@@ -2362,9 +2367,8 @@ public class StorageProxy implements StorageProxyMBean
      * @param cfname
      * @throws UnavailableException If some of the hosts in the ring are down.
      * @throws TimeoutException
-     * @throws IOException
      */
-    public static void truncateBlocking(String keyspace, String cfname) throws UnavailableException, TimeoutException, IOException
+    public static void truncateBlocking(String keyspace, String cfname) throws UnavailableException, TimeoutException
     {
         logger.debug("Starting a blocking truncate operation on keyspace {}, CF {}", keyspace, cfname);
         if (isAnyStorageHostDown())

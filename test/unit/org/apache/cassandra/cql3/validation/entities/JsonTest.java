@@ -618,8 +618,10 @@ public class JsonTest extends CQLTester
         assertRows(execute("SELECT k, toJson(timeval) FROM %s WHERE k = ?", 0), row(0, "\"00:00:00.000000123\""));
 
         // ================ timestamp ================
-        execute("INSERT INTO %s (k, timestampval) VALUES (?, ?)", 0, new SimpleDateFormat("y-M-d").parse("2014-01-01"));
-        assertRows(execute("SELECT k, toJson(timestampval) FROM %s WHERE k = ?", 0), row(0, "\"2014-01-01 00:00:00.000\""));
+        SimpleDateFormat sdf = new SimpleDateFormat("y-M-d");
+        sdf.setTimeZone(TimeZone.getTimeZone("UDT"));
+        execute("INSERT INTO %s (k, timestampval) VALUES (?, ?)", 0, sdf.parse("2014-01-01"));
+        assertRows(execute("SELECT k, toJson(timestampval) FROM %s WHERE k = ?", 0), row(0, "\"2014-01-01 00:00:00.000Z\""));
 
         // ================ timeuuid ================
         execute("INSERT INTO %s (k, timeuuidval) VALUES (?, ?)", 0, UUID.fromString("6bddc89a-5644-11e4-97fc-56847afe9799"));
@@ -979,10 +981,10 @@ public class JsonTest extends CQLTester
 
     // done for CASSANDRA-11048
     @Test
-    public void testJsonTreadSafety() throws Throwable
+    public void testJsonThreadSafety() throws Throwable
     {
         int numThreads = 10;
-        final int numRows = 10000;
+        final int numRows = 5000;
 
         createTable("CREATE TABLE %s (" +
                 "k text PRIMARY KEY, " +
@@ -1023,9 +1025,9 @@ public class JsonTest extends CQLTester
             futures.add(executor.submit(worker));
 
         for (Future future : futures)
-            future.get(10, TimeUnit.SECONDS);
+            future.get(30, TimeUnit.SECONDS);
 
         executor.shutdown();
-        Assert.assertTrue(executor.awaitTermination(10, TimeUnit.SECONDS));
+        Assert.assertTrue(executor.awaitTermination(30, TimeUnit.SECONDS));
     }
 }

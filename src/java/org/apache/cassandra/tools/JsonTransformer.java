@@ -1,23 +1,44 @@
+/*
+ *
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ */
 package org.apache.cassandra.tools;
 
 import java.io.IOException;
 import java.io.OutputStream;
 import java.io.OutputStreamWriter;
 import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
+import java.time.Instant;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
 
 import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.config.ColumnDefinition;
-import org.apache.cassandra.db.ClusteringPrefix;
-import org.apache.cassandra.db.DecoratedKey;
-import org.apache.cassandra.db.DeletionTime;
-import org.apache.cassandra.db.LivenessInfo;
-import org.apache.cassandra.db.RangeTombstone;
+import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.db.marshal.CollectionType;
 import org.apache.cassandra.db.marshal.CompositeType;
 import org.apache.cassandra.db.rows.Cell;
+import org.apache.cassandra.db.rows.ColumnData;
+import org.apache.cassandra.db.rows.ComplexColumnData;
 import org.apache.cassandra.db.rows.RangeTombstoneBoundMarker;
 import org.apache.cassandra.db.rows.RangeTombstoneBoundaryMarker;
 import org.apache.cassandra.db.rows.RangeTombstoneMarker;
@@ -51,13 +72,16 @@ public final class JsonTransformer
 
     private final ISSTableScanner currentScanner;
 
+    private boolean rawTime = false;
+
     private long currentPosition = 0;
 
-    private JsonTransformer(JsonGenerator json, ISSTableScanner currentScanner, CFMetaData metadata)
+    private JsonTransformer(JsonGenerator json, ISSTableScanner currentScanner, boolean rawTime, CFMetaData metadata)
     {
         this.json = json;
         this.metadata = metadata;
         this.currentScanner = currentScanner;
+        this.rawTime = rawTime;
 
         DefaultPrettyPrinter prettyPrinter = new DefaultPrettyPrinter();
         prettyPrinter.indentObjectsWith(objectIndenter);
@@ -65,23 +89,23 @@ public final class JsonTransformer
         json.setPrettyPrinter(prettyPrinter);
     }
 
-    public static void toJson(ISSTableScanner currentScanner, Stream<UnfilteredRowIterator> partitions, CFMetaData metadata, OutputStream out)
+    public static void toJson(ISSTableScanner currentScanner, Stream<UnfilteredRowIterator> partitions, boolean rawTime, CFMetaData metadata, OutputStream out)
             throws IOException
     {
-        try (JsonGenerator json = jsonFactory.createJsonGenerator(new OutputStreamWriter(out, "UTF-8")))
+        try (JsonGenerator json = jsonFactory.createJsonGenerator(new OutputStreamWriter(out, StandardCharsets.UTF_8)))
         {
-            JsonTransformer transformer = new JsonTransformer(json, currentScanner, metadata);
+            JsonTransformer transformer = new JsonTransformer(json, currentScanner, rawTime, metadata);
             json.writeStartArray();
             partitions.forEach(transformer::serializePartition);
             json.writeEndArray();
         }
     }
 
-    public static void keysToJson(ISSTableScanner currentScanner, Stream<DecoratedKey> keys, CFMetaData metadata, OutputStream out) throws IOException
+    public static void keysToJson(ISSTableScanner currentScanner, Stream<DecoratedKey> keys, boolean rawTime, CFMetaData metadata, OutputStream out) throws IOException
     {
-        try (JsonGenerator json = jsonFactory.createJsonGenerator(new OutputStreamWriter(out, "UTF-8")))
+        try (JsonGenerator json = jsonFactory.createJsonGenerator(new OutputStreamWriter(out, StandardCharsets.UTF_8)))
         {
-            JsonTransformer transformer = new JsonTransformer(json, currentScanner, metadata);
+            JsonTransformer transformer = new JsonTransformer(json, currentScanner, rawTime, metadata);
             json.writeStartArray();
             keys.forEach(transformer::serializePartitionKey);
             json.writeEndArray();
@@ -165,16 +189,7 @@ public final class JsonTransformer
 
             if (!partition.partitionLevelDeletion().isLive())
             {
-                json.writeFieldName("deletion_info");
-                objectIndenter.setCompact(true);
-                json.writeStartObject();
-                json.writeFieldName("deletion_time");
-                json.writeNumber(partition.partitionLevelDeletion().markedForDeleteAt());
-                json.writeFieldName("tstamp");
-                json.writeNumber(partition.partitionLevelDeletion().localDeletionTime());
-                json.writeEndObject();
-                objectIndenter.setCompact(false);
-                json.writeEndObject();
+                serializeDeletion(partition.partitionLevelDeletion());
             }
             else
             {
@@ -236,13 +251,12 @@ public final class JsonTransformer
                 objectIndenter.setCompact(true);
                 json.writeStartObject();
                 json.writeFieldName("tstamp");
-                json.writeNumber(liveInfo.timestamp());
+                json.writeString(dateString(TimeUnit.MICROSECONDS, liveInfo.timestamp()));
                 if (liveInfo.isExpiring())
                 {
-                    json.writeFieldName("ttl");
-                    json.writeNumber(liveInfo.ttl());
+                    json.writeNumberField("ttl", liveInfo.ttl());
                     json.writeFieldName("expires_at");
-                    json.writeNumber(liveInfo.localExpirationTime());
+                    json.writeString(dateString(TimeUnit.SECONDS, liveInfo.localExpirationTime()));
                     json.writeFieldName("expired");
                     json.writeBoolean(liveInfo.localExpirationTime() < (System.currentTimeMillis() / 1000));
                 }
@@ -253,23 +267,15 @@ public final class JsonTransformer
             // If this is a deletion, indicate that, otherwise write cells.
             if (!row.deletion().isLive())
             {
-                json.writeFieldName("deletion_info");
-                objectIndenter.setCompact(true);
-                json.writeStartObject();
-                json.writeFieldName("deletion_time");
-                json.writeNumber(row.deletion().time().markedForDeleteAt());
-                json.writeFieldName("tstamp");
-                json.writeNumber(row.deletion().time().localDeletionTime());
-                json.writeEndObject();
-                objectIndenter.setCompact(false);
+                serializeDeletion(row.deletion().time());
             }
-            else
+            json.writeFieldName("cells");
+            json.writeStartArray();
+            for (ColumnData cd : row)
             {
-                json.writeFieldName("cells");
-                json.writeStartArray();
-                row.cells().forEach(c -> serializeCell(c, liveInfo));
-                json.writeEndArray();
+                serializeColumnData(cd, liveInfo);
             }
+            json.writeEndArray();
             json.writeEndObject();
         }
         catch (IOException e)
@@ -308,7 +314,7 @@ public final class JsonTransformer
         }
     }
 
-    private void serializeBound(RangeTombstone.Bound bound, DeletionTime deletionTime) throws IOException
+    private void serializeBound(ClusteringBound bound, DeletionTime deletionTime) throws IOException
     {
         json.writeFieldName(bound.isStart() ? "start" : "end");
         json.writeStartObject();
@@ -351,12 +357,45 @@ public final class JsonTransformer
         json.writeFieldName("deletion_info");
         objectIndenter.setCompact(true);
         json.writeStartObject();
-        json.writeFieldName("deletion_time");
-        json.writeNumber(deletion.markedForDeleteAt());
-        json.writeFieldName("tstamp");
-        json.writeNumber(deletion.localDeletionTime());
+        json.writeFieldName("marked_deleted");
+        json.writeString(dateString(TimeUnit.MICROSECONDS, deletion.markedForDeleteAt()));
+        json.writeFieldName("local_delete_time");
+        json.writeString(dateString(TimeUnit.SECONDS, deletion.localDeletionTime()));
         json.writeEndObject();
         objectIndenter.setCompact(false);
+    }
+
+    private void serializeColumnData(ColumnData cd, LivenessInfo liveInfo)
+    {
+        if (cd.column().isSimple())
+        {
+            serializeCell((Cell) cd, liveInfo);
+        }
+        else
+        {
+            ComplexColumnData complexData = (ComplexColumnData) cd;
+            if (!complexData.complexDeletion().isLive())
+            {
+                try
+                {
+                    objectIndenter.setCompact(true);
+                    json.writeStartObject();
+                    json.writeFieldName("name");
+                    json.writeString(cd.column().name.toCQLString());
+                    serializeDeletion(complexData.complexDeletion());
+                    objectIndenter.setCompact(true);
+                    json.writeEndObject();
+                    objectIndenter.setCompact(false);
+                }
+                catch (IOException e)
+                {
+                    logger.error("Failure parsing ColumnData.", e);
+                }
+            }
+            for (Cell cell : complexData){
+                serializeCell(cell, liveInfo);
+            }
+        }
     }
 
     private void serializeCell(Cell cell, LivenessInfo liveInfo)
@@ -384,8 +423,13 @@ public final class JsonTransformer
             }
             if (cell.isTombstone())
             {
-                json.writeFieldName("deletion_time");
-                json.writeNumber(cell.localDeletionTime());
+                json.writeFieldName("deletion_info");
+                objectIndenter.setCompact(true);
+                json.writeStartObject();
+                json.writeFieldName("local_delete_time");
+                json.writeString(dateString(TimeUnit.SECONDS, cell.localDeletionTime()));
+                json.writeEndObject();
+                objectIndenter.setCompact(false);
             }
             else
             {
@@ -395,14 +439,14 @@ public final class JsonTransformer
             if (liveInfo.isEmpty() || cell.timestamp() != liveInfo.timestamp())
             {
                 json.writeFieldName("tstamp");
-                json.writeNumber(cell.timestamp());
+                json.writeString(dateString(TimeUnit.MICROSECONDS, cell.timestamp()));
             }
             if (cell.isExpiring() && (liveInfo.isEmpty() || cell.ttl() != liveInfo.ttl()))
             {
                 json.writeFieldName("ttl");
                 json.writeNumber(cell.ttl());
                 json.writeFieldName("expires_at");
-                json.writeNumber(cell.localDeletionTime());
+                json.writeString(dateString(TimeUnit.SECONDS, cell.localDeletionTime()));
                 json.writeFieldName("expired");
                 json.writeBoolean(!cell.isLive((int) (System.currentTimeMillis() / 1000)));
             }
@@ -413,6 +457,13 @@ public final class JsonTransformer
         {
             logger.error("Failure parsing cell.", e);
         }
+    }
+
+    private String dateString(TimeUnit from, long time)
+    {
+        long secs = from.toSeconds(time);
+        long offset = Math.floorMod(from.toNanos(time), 1000_000_000L); // nanos per sec
+        return rawTime? Long.toString(time) : Instant.ofEpochSecond(secs, offset).toString();
     }
 
     /**

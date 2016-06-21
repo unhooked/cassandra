@@ -20,15 +20,22 @@ package org.apache.cassandra.db.filter;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import com.google.common.base.Objects;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.config.ColumnDefinition;
 import org.apache.cassandra.cql3.Operator;
 import org.apache.cassandra.db.*;
+import org.apache.cassandra.db.context.*;
 import org.apache.cassandra.db.marshal.*;
-import org.apache.cassandra.db.partitions.*;
+import org.apache.cassandra.db.partitions.ImmutableBTreePartition;
+import org.apache.cassandra.db.partitions.UnfilteredPartitionIterator;
 import org.apache.cassandra.db.rows.*;
 import org.apache.cassandra.db.transform.Transformation;
 import org.apache.cassandra.exceptions.InvalidRequestException;
@@ -53,6 +60,8 @@ import static org.apache.cassandra.cql3.statements.RequestValidations.checkNotNu
  */
 public abstract class RowFilter implements Iterable<RowFilter.Expression>
 {
+    private static final Logger logger = LoggerFactory.getLogger(RowFilter.class);
+
     public static final Serializer serializer = new Serializer();
     public static final RowFilter NONE = new CQLFilter(Collections.emptyList());
 
@@ -78,9 +87,11 @@ public abstract class RowFilter implements Iterable<RowFilter.Expression>
         return new ThriftFilter(new ArrayList<>(capacity));
     }
 
-    public void add(ColumnDefinition def, Operator op, ByteBuffer value)
+    public SimpleExpression add(ColumnDefinition def, Operator op, ByteBuffer value)
     {
-        add(new SimpleExpression(def, op, value));
+        SimpleExpression expression = new SimpleExpression(def, op, value);
+        add(expression);
+        return expression;
     }
 
     public void addMapEquality(ColumnDefinition def, ByteBuffer key, Operator op, ByteBuffer value)
@@ -105,6 +116,11 @@ public abstract class RowFilter implements Iterable<RowFilter.Expression>
         expressions.add(expression);
     }
 
+    public void addUserExpression(UserExpression e)
+    {
+        expressions.add(e);
+    }
+
     public List<Expression> getExpressions()
     {
         return expressions;
@@ -119,6 +135,30 @@ public abstract class RowFilter implements Iterable<RowFilter.Expression>
      * @return the filtered iterator.
      */
     public abstract UnfilteredPartitionIterator filter(UnfilteredPartitionIterator iter, int nowInSec);
+
+    /**
+     * Whether the provided row in the provided partition satisfies this filter.
+     *
+     * @param metadata the table metadata.
+     * @param partitionKey the partition key for partition to test.
+     * @param row the row to test.
+     * @param nowInSec the current time in seconds (to know what is live and what isn't).
+     * @return {@code true} if {@code row} in partition {@code partitionKey} satisfies this row filter.
+     */
+    public boolean isSatisfiedBy(CFMetaData metadata, DecoratedKey partitionKey, Row row, int nowInSec)
+    {
+        // We purge all tombstones as the expressions isSatisfiedBy methods expects it
+        Row purged = row.purge(DeletionPurger.PURGE_ALL, nowInSec);
+        if (purged == null)
+            return expressions.isEmpty();
+
+        for (Expression e : expressions)
+        {
+            if (!e.isSatisfiedBy(metadata, partitionKey, purged))
+                return false;
+        }
+        return true;
+    }
 
     /**
      * Returns true if all of the expressions within this filter that apply to the partition key are satisfied by
@@ -243,13 +283,13 @@ public abstract class RowFilter implements Iterable<RowFilter.Expression>
                 DecoratedKey pk;
                 public UnfilteredRowIterator applyToPartition(UnfilteredRowIterator partition)
                 {
+                    pk = partition.partitionKey();
+
                     // The filter might be on static columns, so need to check static row first.
                     if (filterStaticColumns && applyToRow(partition.staticRow()) == null)
                         return null;
 
-                    pk = partition.partitionKey();
                     UnfilteredRowIterator iterator = Transformation.apply(partition, this);
-
                     return (filterNonStaticColumns && !iterator.hasNext()) ? null : iterator;
                 }
 
@@ -325,7 +365,7 @@ public abstract class RowFilter implements Iterable<RowFilter.Expression>
         private static final Serializer serializer = new Serializer();
 
         // Note: the order of this enum matter, it's used for serialization
-        protected enum Kind { SIMPLE, MAP_EQUALITY, THRIFT_DYN_EXPR, CUSTOM }
+        protected enum Kind { SIMPLE, MAP_EQUALITY, THRIFT_DYN_EXPR, CUSTOM, USER }
 
         protected abstract Kind kind();
         protected final ColumnDefinition column;
@@ -342,6 +382,11 @@ public abstract class RowFilter implements Iterable<RowFilter.Expression>
         public boolean isCustom()
         {
             return kind() == Kind.CUSTOM;
+        }
+
+        public boolean isUserDefined()
+        {
+            return kind() == Kind.USER;
         }
 
         public ColumnDefinition column()
@@ -466,6 +511,13 @@ public abstract class RowFilter implements Iterable<RowFilter.Expression>
                     return;
                 }
 
+                if (expression.kind() == Kind.USER)
+                {
+                    assert version >= MessagingService.VERSION_30;
+                    UserExpression.serialize((UserExpression)expression, out, version);
+                    return;
+                }
+
                 ByteBufferUtil.writeWithShortLength(expression.column.name.bytes, out);
                 expression.operator.writeTo(out);
 
@@ -508,6 +560,11 @@ public abstract class RowFilter implements Iterable<RowFilter.Expression>
                         return new CustomExpression(metadata,
                                                     IndexMetadata.serializer.deserialize(in, version, metadata),
                                                     ByteBufferUtil.readWithShortLength(in));
+                    }
+
+                    if (kind == Kind.USER)
+                    {
+                        return UserExpression.deserialize(in, version, metadata);
                     }
                 }
 
@@ -558,8 +615,11 @@ public abstract class RowFilter implements Iterable<RowFilter.Expression>
                 // version 3.0+ includes a byte for Kind
                 long size = version >= MessagingService.VERSION_30 ? 1 : 0;
 
-                // custom expressions don't include a column or operator, all other expressions do
-                if (expression.kind() != Kind.CUSTOM)
+                // Custom expressions include neither a column or operator, but all
+                // other expressions do. Also, custom expressions are 3.0+ only, so
+                // the column & operator will always be the first things written for
+                // any pre-3.0 version
+                if (expression.kind() != Kind.CUSTOM && expression.kind() != Kind.USER)
                     size += ByteBufferUtil.serializedSizeWithShortLength(expression.column().name.bytes)
                             + expression.operator.serializedSize();
 
@@ -582,8 +642,11 @@ public abstract class RowFilter implements Iterable<RowFilter.Expression>
                     case CUSTOM:
                         if (version >= MessagingService.VERSION_30)
                             size += IndexMetadata.serializer.serializedSize(((CustomExpression)expression).targetIndex, version)
-                                  + ByteBufferUtil.serializedSizeWithShortLength(expression.value);
+                                   + ByteBufferUtil.serializedSizeWithShortLength(expression.value);
                         break;
+                    case USER:
+                        if (version >= MessagingService.VERSION_30)
+                            size += UserExpression.serializedSize((UserExpression)expression, version);
                 }
                 return size;
             }
@@ -593,9 +656,9 @@ public abstract class RowFilter implements Iterable<RowFilter.Expression>
     /**
      * An expression of the form 'column' 'op' 'value'.
      */
-    private static class SimpleExpression extends Expression
+    public static class SimpleExpression extends Expression
     {
-        public SimpleExpression(ColumnDefinition column, Operator operator, ByteBuffer value)
+        SimpleExpression(ColumnDefinition column, Operator operator, ByteBuffer value)
         {
             super(column, operator, value);
         }
@@ -616,6 +679,27 @@ public abstract class RowFilter implements Iterable<RowFilter.Expression>
                 case LTE:
                 case GTE:
                 case GT:
+                    {
+                        assert !column.isComplex() : "Only CONTAINS and CONTAINS_KEY are supported for 'complex' types";
+
+                        // In order to support operators on Counter types, their value has to be extracted from internal
+                        // representation. See CASSANDRA-11629
+                        if (column.type.isCounter())
+                        {
+                            ByteBuffer foundValue = getValue(metadata, partitionKey, row);
+                            if (foundValue == null)
+                                return false;
+
+                            ByteBuffer counterValue = LongType.instance.decompose(CounterContext.instance().total(foundValue));
+                            return operator.isSatisfiedBy(LongType.instance, counterValue, value);
+                        }
+                        else
+                        {
+                            // Note that CQL expression are always of the form 'x < 4', i.e. the tested value is on the left.
+                            ByteBuffer foundValue = getValue(metadata, partitionKey, row);
+                            return foundValue != null && operator.isSatisfiedBy(column.type, foundValue, value);
+                        }
+                    }
                 case NEQ:
                 case LIKE_PREFIX:
                 case LIKE_SUFFIX:
@@ -916,6 +1000,100 @@ public abstract class RowFilter implements Iterable<RowFilter.Expression>
         {
             return true;
         }
+    }
+
+    /**
+     * A user defined filtering expression. These may be added to RowFilter programmatically by a
+     * QueryHandler implementation. No concrete implementations are provided and adding custom impls
+     * to the classpath is a task for operators (needless to say, this is something of a power
+     * user feature). Care must also be taken to register implementations, via the static register
+     * method during system startup. An implementation and its corresponding Deserializer must be
+     * registered before sending or receiving any messages containing expressions of that type.
+     * Use of custom filtering expressions in a mixed version cluster should be handled with caution
+     * as the order in which types are registered is significant: if continuity of use during upgrades
+     * is important, new types should registered last and obsoleted types should still be registered (
+     * or dummy implementations registered in their place) to preserve consistent identifiers across
+     * the cluster).
+     *
+     * During serialization, the identifier for the Deserializer implementation is prepended to the
+     * implementation specific payload. To deserialize, the identifier is read first to obtain the
+     * Deserializer, which then provides the concrete expression instance.
+     */
+    public static abstract class UserExpression extends Expression
+    {
+        private static final DeserializerRegistry deserializers = new DeserializerRegistry();
+        private static final class DeserializerRegistry
+        {
+            private final AtomicInteger counter = new AtomicInteger(0);
+            private final ConcurrentMap<Integer, Deserializer> deserializers = new ConcurrentHashMap<>();
+            private final ConcurrentMap<Class<? extends UserExpression>, Integer> registeredClasses = new ConcurrentHashMap<>();
+
+            public void registerUserExpressionClass(Class<? extends UserExpression> expressionClass,
+                                                    UserExpression.Deserializer deserializer)
+            {
+                int id = registeredClasses.computeIfAbsent(expressionClass, (cls) -> counter.getAndIncrement());
+                deserializers.put(id, deserializer);
+
+                logger.debug("Registered user defined expression type {} and serializer {} with identifier {}",
+                             expressionClass.getName(), deserializer.getClass().getName(), id);
+            }
+
+            public Integer getId(UserExpression expression)
+            {
+                return registeredClasses.get(expression.getClass());
+            }
+
+            public Deserializer getDeserializer(int id)
+            {
+                return deserializers.get(id);
+            }
+        }
+
+        protected static abstract class Deserializer
+        {
+            protected abstract UserExpression deserialize(DataInputPlus in,
+                                                          int version,
+                                                          CFMetaData metadata) throws IOException;
+        }
+
+        public static void register(Class<? extends UserExpression> expressionClass, Deserializer deserializer)
+        {
+            deserializers.registerUserExpressionClass(expressionClass, deserializer);
+        }
+
+        private static UserExpression deserialize(DataInputPlus in, int version, CFMetaData metadata) throws IOException
+        {
+            int id = in.readInt();
+            Deserializer deserializer = deserializers.getDeserializer(id);
+            assert deserializer != null : "No user defined expression type registered with id " + id;
+            return deserializer.deserialize(in, version, metadata);
+        }
+
+        private static void serialize(UserExpression expression, DataOutputPlus out, int version) throws IOException
+        {
+            Integer id = deserializers.getId(expression);
+            assert id != null : "User defined expression type " + expression.getClass().getName() + " is not registered";
+            out.writeInt(id);
+            expression.serialize(out, version);
+        }
+
+        private static long serializedSize(UserExpression expression, int version)
+        {   // 4 bytes for the expression type id
+            return 4 + expression.serializedSize(version);
+        }
+
+        protected UserExpression(ColumnDefinition column, Operator operator, ByteBuffer value)
+        {
+            super(column, operator, value);
+        }
+
+        protected Kind kind()
+        {
+            return Kind.USER;
+        }
+
+        protected abstract void serialize(DataOutputPlus out, int version) throws IOException;
+        protected abstract long serializedSize(int version);
     }
 
     public static class Serializer

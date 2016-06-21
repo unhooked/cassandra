@@ -65,6 +65,7 @@ public class OnDiskIndexTest
                 put(UTF8Type.instance.decompose("foo"),  keyBuilder(7L));
                 put(UTF8Type.instance.decompose("bar"),  keyBuilder(9L, 10L));
                 put(UTF8Type.instance.decompose("michael"), keyBuilder(11L, 12L, 1L));
+                put(UTF8Type.instance.decompose("am"), keyBuilder(15L));
         }};
 
         OnDiskIndexBuilder builder = new OnDiskIndexBuilder(UTF8Type.instance, UTF8Type.instance, OnDiskIndexBuilder.Mode.CONTAINS);
@@ -100,6 +101,7 @@ public class OnDiskIndexTest
         Assert.assertEquals(convert(7), convert(onDisk.search(expressionFor("oo"))));
         Assert.assertEquals(convert(7), convert(onDisk.search(expressionFor("o"))));
         Assert.assertEquals(convert(1, 2, 3, 4, 6), convert(onDisk.search(expressionFor("t"))));
+        Assert.assertEquals(convert(1, 2, 11, 12), convert(onDisk.search(expressionFor("m", Operator.LIKE_PREFIX))));
 
         Assert.assertEquals(Collections.<DecoratedKey>emptySet(), convert(onDisk.search(expressionFor("hello"))));
 
@@ -605,6 +607,12 @@ public class OnDiskIndexTest
         }
     }
 
+    public void putAll(SortedMap<Long, LongSet> offsets, TokenTreeBuilder ttb)
+    {
+        for (Pair<Long, LongSet> entry : ttb)
+            offsets.put(entry.left, entry.right);
+    }
+
     @Test
     public void testCombiningOfThePartitionedSA() throws Exception
     {
@@ -620,7 +628,7 @@ public class OnDiskIndexTest
                 expected.put(i, (offsets = new TreeMap<>()));
 
             builderA.add(LongType.instance.decompose(i), keyAt(i), i);
-            offsets.putAll(keyBuilder(i).getTokens());
+            putAll(offsets, keyBuilder(i));
         }
 
         for (long i = 50; i < 100; i++)
@@ -631,7 +639,7 @@ public class OnDiskIndexTest
 
             long position = 100L + i;
             builderB.add(LongType.instance.decompose(i), keyAt(position), position);
-            offsets.putAll(keyBuilder(100L + i).getTokens());
+            putAll(offsets, keyBuilder(100L + i));
         }
 
         File indexA = File.createTempFile("on-disk-sa-partition-a", ".db");
@@ -659,7 +667,7 @@ public class OnDiskIndexTest
             if (offsets == null)
                 actual.put(composedTerm, (offsets = new TreeMap<>()));
 
-            offsets.putAll(term.getTokens());
+            putAll(offsets, term.getTokenTreeBuilder());
         }
 
         Assert.assertEquals(actual, expected);
@@ -684,7 +692,7 @@ public class OnDiskIndexTest
             if (offsets == null)
                 actual.put(composedTerm, (offsets = new TreeMap<>()));
 
-            offsets.putAll(term.getTokens());
+            putAll(offsets, term.getTokenTreeBuilder());
         }
 
         Assert.assertEquals(actual, expected);
@@ -735,7 +743,7 @@ public class OnDiskIndexTest
 
     private static TokenTreeBuilder keyBuilder(Long... keys)
     {
-        TokenTreeBuilder builder = new TokenTreeBuilder();
+        TokenTreeBuilder builder = new DynamicTokenTreeBuilder();
 
         for (final Long key : keys)
         {
@@ -845,14 +853,19 @@ public class OnDiskIndexTest
 
     private static Expression expressionFor(String term)
     {
-        return expressionFor(UTF8Type.instance, UTF8Type.instance.decompose(term));
+        return expressionFor(term, Operator.LIKE_CONTAINS);
+    }
+
+    private static Expression expressionFor(String term, Operator op)
+    {
+        return expressionFor(op, UTF8Type.instance, UTF8Type.instance.decompose(term));
     }
 
     private static void addAll(OnDiskIndexBuilder builder, ByteBuffer term, TokenTreeBuilder tokens)
     {
-        for (Map.Entry<Long, LongSet> token : tokens.getTokens().entrySet())
+        for (Pair<Long, LongSet> token : tokens)
         {
-            for (long position : token.getValue().toArray())
+            for (long position : token.right.toArray())
                 builder.add(term, keyAt(position), position);
         }
     }

@@ -19,6 +19,7 @@ package org.apache.cassandra.cql3.functions;
 
 import java.math.BigDecimal;
 import java.math.BigInteger;
+import java.math.RoundingMode;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -179,9 +180,9 @@ public abstract class AggregateFcts
                         public ByteBuffer compute(int protocolVersion)
                         {
                             if (count == 0)
-                                return ((DecimalType) returnType()).decompose(BigDecimal.ZERO);
+                                return DecimalType.instance.decompose(BigDecimal.ZERO);
 
-                            return ((DecimalType) returnType()).decompose(sum.divide(BigDecimal.valueOf(count)));
+                            return DecimalType.instance.decompose(sum.divide(BigDecimal.valueOf(count), BigDecimal.ROUND_HALF_EVEN));
                         }
 
                         public void addInput(int protocolVersion, List<ByteBuffer> values)
@@ -192,12 +193,13 @@ public abstract class AggregateFcts
                                 return;
 
                             count++;
-                            BigDecimal number = ((BigDecimal) argTypes().get(0).compose(value));
+                            BigDecimal number = DecimalType.instance.compose(value);
                             sum = sum.add(number);
                         }
                     };
                 }
             };
+
 
     /**
      * The SUM function for varint values.
@@ -279,7 +281,7 @@ public abstract class AggregateFcts
             };
 
     /**
-     * The SUM function for int32 values.
+     * The SUM function for byte values (tinyint).
      */
     public static final AggregateFunction sumFunctionForByte =
             new NativeAggregateFunction("sum", ByteType.instance, ByteType.instance)
@@ -315,7 +317,7 @@ public abstract class AggregateFcts
             };
 
     /**
-     * AVG function for int32 values.
+     * AVG function for byte values (tinyint).
      */
     public static final AggregateFunction avgFunctionForByte =
             new NativeAggregateFunction("avg", ByteType.instance, ByteType.instance)
@@ -357,7 +359,7 @@ public abstract class AggregateFcts
             };
 
     /**
-     * The SUM function for int32 values.
+     * The SUM function for short values (smallint).
      */
     public static final AggregateFunction sumFunctionForShort =
             new NativeAggregateFunction("sum", ShortType.instance, ShortType.instance)
@@ -393,7 +395,7 @@ public abstract class AggregateFcts
             };
 
     /**
-     * AVG function for int32 values.
+     * AVG function for for short values (smallint).
      */
     public static final AggregateFunction avgFunctionForShort =
             new NativeAggregateFunction("avg", ShortType.instance, ShortType.instance)
@@ -755,7 +757,7 @@ public abstract class AggregateFcts
     };
 
     /**
-     * AVG function for counter column values.
+     * MAX function for counter column values.
      */
     public static final AggregateFunction maxFunctionForCounter =
     new NativeAggregateFunction("max", CounterColumnType.instance, CounterColumnType.instance)

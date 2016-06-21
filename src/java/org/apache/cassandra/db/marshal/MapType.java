@@ -117,6 +117,23 @@ public class MapType<K, V> extends CollectionType<Map<K, V>>
     }
 
     @Override
+    public AbstractType<?> freezeNestedMulticellTypes()
+    {
+        if (!isMultiCell())
+            return this;
+
+        AbstractType<?> keyType = (keys.isFreezable() && keys.isMultiCell())
+                                ? keys.freeze()
+                                : keys.freezeNestedMulticellTypes();
+
+        AbstractType<?> valueType = (values.isFreezable() && values.isMultiCell())
+                                  ? values.freeze()
+                                  : values.freezeNestedMulticellTypes();
+
+        return getInstance(keyType, valueType, isMultiCell);
+    }
+
+    @Override
     public boolean isCompatibleWithFrozen(CollectionType<?> previous)
     {
         assert !isMultiCell;

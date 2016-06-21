@@ -111,8 +111,10 @@ public class Tuples
             for (int i = 0; i < elements.size(); i++)
             {
                 if (i >= tt.size())
+                {
                     throw new InvalidRequestException(String.format("Invalid tuple literal for %s: too many elements. Type %s expects %d but got %d",
-                                                                    receiver.name, tt.asCQL3Type(), tt.size(), elements.size()));
+                            receiver.name, tt.asCQL3Type(), tt.size(), elements.size()));
+                }
 
                 Term.Raw value = elements.get(i);
                 ColumnSpecification spec = componentSpecOf(receiver, i);
@@ -132,6 +134,20 @@ public class Tuples
             {
                 return AssignmentTestable.TestResult.NOT_ASSIGNABLE;
             }
+        }
+
+        @Override
+        public AbstractType<?> getExactTypeIfKnown(String keyspace)
+        {
+            List<AbstractType<?>> types = new ArrayList<>(elements.size());
+            for (Term.Raw term : elements)
+            {
+                AbstractType<?> type = term.getExactTypeIfKnown(keyspace);
+                if (type == null)
+                    return null;
+                types.add(type);
+            }
+            return new TupleType(types);
         }
 
         public String getText()
@@ -154,6 +170,13 @@ public class Tuples
 
         public static Value fromSerialized(ByteBuffer bytes, TupleType type)
         {
+            ByteBuffer[] values = type.split(bytes);
+            if (values.length > type.size())
+            {
+                throw new InvalidRequestException(String.format(
+                        "Tuple value contained too many fields (expected %s, got %s)", type.size(), values.length));
+            }
+
             return new Value(type.split(bytes));
         }
 
@@ -199,6 +222,10 @@ public class Tuples
 
         private ByteBuffer[] bindInternal(QueryOptions options) throws InvalidRequestException
         {
+            if (elements.size() > type.size())
+                throw new InvalidRequestException(String.format(
+                        "Tuple value contained too many fields (expected %s, got %s)", type.size(), elements.size()));
+
             ByteBuffer[] buffers = new ByteBuffer[elements.size()];
             for (int i = 0; i < elements.size(); i++)
             {
@@ -228,9 +255,9 @@ public class Tuples
             return tupleToString(elements);
         }
 
-        public Iterable<Function> getFunctions()
+        public void addFunctionsTo(List<Function> functions)
         {
-            return Terms.getFunctions(elements);
+            Terms.addFunctions(elements, functions);
         }
     }
 
@@ -313,6 +340,11 @@ public class Tuples
             return new ColumnSpecification(receivers.get(0).ksName, receivers.get(0).cfName, identifier, type);
         }
 
+        public AbstractType<?> getExactTypeIfKnown(String keyspace)
+        {
+            return null;
+        }
+
         public AbstractMarker prepare(String keyspace, List<? extends ColumnSpecification> receivers) throws InvalidRequestException
         {
             return new Tuples.Marker(bindIndex, makeReceiver(receivers));
@@ -350,6 +382,11 @@ public class Tuples
             ColumnIdentifier identifier = new ColumnIdentifier(inName.toString(), true);
             TupleType type = new TupleType(types);
             return new ColumnSpecification(receivers.get(0).ksName, receivers.get(0).cfName, identifier, ListType.getInstance(type, false));
+        }
+
+        public AbstractType<?> getExactTypeIfKnown(String keyspace)
+        {
+            return null;
         }
 
         public AbstractMarker prepare(String keyspace, List<? extends ColumnSpecification> receivers) throws InvalidRequestException

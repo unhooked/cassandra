@@ -22,39 +22,33 @@ import java.io.IOException;
 import java.lang.management.ManagementFactory;
 import java.lang.management.MemoryPoolMXBean;
 import java.net.InetAddress;
+import java.net.URL;
 import java.net.UnknownHostException;
-import java.rmi.registry.LocateRegistry;
-import java.rmi.server.RMIServerSocketFactory;
-import java.util.Collections;
 import java.util.List;
-import java.util.Map;
 import java.util.concurrent.TimeUnit;
-
 import javax.management.MBeanServer;
 import javax.management.ObjectName;
 import javax.management.StandardMBean;
 import javax.management.remote.JMXConnectorServer;
-import javax.management.remote.JMXServiceURL;
-import javax.management.remote.rmi.RMIConnectorServer;
+
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.util.concurrent.Futures;
+import com.google.common.util.concurrent.ListenableFuture;
+import com.google.common.util.concurrent.Uninterruptibles;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import com.addthis.metrics3.reporter.config.ReporterConfig;
 import com.codahale.metrics.Meter;
 import com.codahale.metrics.MetricRegistryListener;
 import com.codahale.metrics.SharedMetricRegistries;
-import com.google.common.annotations.VisibleForTesting;
-import com.google.common.util.concurrent.Futures;
-import com.google.common.util.concurrent.ListenableFuture;
-import com.google.common.util.concurrent.Uninterruptibles;
-
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
-import org.apache.cassandra.concurrent.*;
+import org.apache.cassandra.batchlog.LegacyBatchlogMigrator;
+import org.apache.cassandra.concurrent.ScheduledExecutors;
 import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.config.Schema;
+import org.apache.cassandra.cql3.functions.ThreadAwareSecurityManager;
 import org.apache.cassandra.db.*;
-import org.apache.cassandra.batchlog.LegacyBatchlogMigrator;
 import org.apache.cassandra.db.commitlog.CommitLog;
 import org.apache.cassandra.exceptions.ConfigurationException;
 import org.apache.cassandra.exceptions.StartupException;
@@ -67,7 +61,6 @@ import org.apache.cassandra.metrics.CassandraMetricsRegistry;
 import org.apache.cassandra.metrics.DefaultNameFactory;
 import org.apache.cassandra.metrics.StorageMetrics;
 import org.apache.cassandra.schema.LegacySchemaMigrator;
-import org.apache.cassandra.cql3.functions.ThreadAwareSecurityManager;
 import org.apache.cassandra.thrift.ThriftServer;
 import org.apache.cassandra.tracing.Tracing;
 import org.apache.cassandra.utils.*;
@@ -81,7 +74,6 @@ import org.apache.cassandra.utils.*;
 public class CassandraDaemon
 {
     public static final String MBEAN_NAME = "org.apache.cassandra.db:type=NativeAccess";
-    private static JMXConnectorServer jmxServer = null;
 
     private static final Logger logger;
     static {
@@ -103,28 +95,53 @@ public class CassandraDaemon
         logger = LoggerFactory.getLogger(CassandraDaemon.class);
     }
 
-    private static void maybeInitJmx()
+    private void maybeInitJmx()
     {
+        // If the standard com.sun.management.jmxremote.port property has been set
+        // then the JVM agent will have already started up a default JMX connector
+        // server. This behaviour is deprecated, but some clients may be relying
+        // on it, so log a warning and skip setting up the server with the settings
+        // as configured in cassandra-env.(sh|ps1)
+        // See: CASSANDRA-11540 & CASSANDRA-11725
         if (System.getProperty("com.sun.management.jmxremote.port") != null)
+        {
+            logger.warn("JMX settings in cassandra-env.sh have been bypassed as the JMX connector server is " +
+                        "already initialized. Please refer to cassandra-env.(sh|ps1) for JMX configuration info");
             return;
+        }
 
-        String jmxPort = System.getProperty("cassandra.jmx.local.port");
+        System.setProperty("java.rmi.server.randomIDs", "true");
+
+        // If a remote port has been specified then use that to set up a JMX
+        // connector server which can be accessed remotely. Otherwise, look
+        // for the local port property and create a server which is bound
+        // only to the loopback address. Auth options are applied to both
+        // remote and local-only servers, but currently SSL is only
+        // available for remote.
+        // If neither is remote nor local port is set in cassandra-env.(sh|ps)
+        // then JMX is effectively  disabled.
+        boolean localOnly = false;
+        String jmxPort = System.getProperty("cassandra.jmx.remote.port");
+
+        if (jmxPort == null)
+        {
+            localOnly = true;
+            jmxPort = System.getProperty("cassandra.jmx.local.port");
+        }
+
         if (jmxPort == null)
             return;
 
-        System.setProperty("java.rmi.server.hostname", InetAddress.getLoopbackAddress().getHostAddress());
-        RMIServerSocketFactory serverFactory = new RMIServerSocketFactoryImpl();
-        Map<String, ?> env = Collections.singletonMap(RMIConnectorServer.RMI_SERVER_SOCKET_FACTORY_ATTRIBUTE, serverFactory);
         try
         {
-            LocateRegistry.createRegistry(Integer.valueOf(jmxPort), null, serverFactory);
-            JMXServiceURL url = new JMXServiceURL(String.format("service:jmx:rmi://localhost/jndi/rmi://localhost:%s/jmxrmi", jmxPort));
-            jmxServer = new RMIConnectorServer(url, env, ManagementFactory.getPlatformMBeanServer());
+            jmxServer = JMXServerUtils.createJMXServer(Integer.parseInt(jmxPort), localOnly);
+            if (jmxServer == null)
+                return;
             jmxServer.start();
         }
         catch (IOException e)
         {
-            logger.error("Error starting local jmx server: ", e);
+            exitOrFail(1, e.getMessage(), e.getCause());
         }
     }
 
@@ -132,6 +149,7 @@ public class CassandraDaemon
 
     public Server thriftServer;
     private NativeTransportService nativeTransportService;
+    private JMXConnectorServer jmxServer;
 
     private final boolean runManaged;
     protected final StartupChecks startupChecks;
@@ -154,6 +172,8 @@ public class CassandraDaemon
      */
     protected void setup()
     {
+        FileUtils.setFSErrorHandler(new DefaultFSErrorHandler());
+
         // Delete any failed snapshot deletions on Windows - see CASSANDRA-9658
         if (FBUtilities.isWindows())
             WindowsFailedSnapshotTracker.deleteOldSnapshots();
@@ -184,6 +204,10 @@ public class CassandraDaemon
         {
             exitOrFail(3, e.getMessage(), e.getCause());
         }
+
+        // We need to persist this as soon as possible after startup checks.
+        // This should be the first write to SystemKeyspace (CASSANDRA-11742)
+        SystemKeyspace.persistLocalMetadata();
 
         maybeInitJmx();
 
@@ -286,10 +310,10 @@ public class CassandraDaemon
             logger.warn("Unable to start GCInspector (currently only supported on the Sun JVM)");
         }
 
-        // replay the log if necessary
+        // Replay any CommitLogSegments found on disk
         try
         {
-            CommitLog.instance.recover();
+            CommitLog.instance.recoverSegmentsOnDisk();
         }
         catch (IOException e)
         {
@@ -318,21 +342,6 @@ public class CassandraDaemon
             }
         }
 
-        Runnable viewRebuild = new Runnable()
-        {
-            @Override
-            public void run()
-            {
-                for (Keyspace keyspace : Keyspace.all())
-                {
-                    keyspace.viewManager.buildAllViews();
-                }
-            }
-        };
-
-        ScheduledExecutors.optionalTasks.schedule(viewRebuild, StorageService.RING_DELAY, TimeUnit.MILLISECONDS);
-
-
         SystemKeyspace.finishStartup();
 
         // Metrics
@@ -342,8 +351,13 @@ public class CassandraDaemon
             logger.info("Trying to load metrics-reporter-config from file: {}", metricsReporterConfigFile);
             try
             {
-                String reportFileLocation = CassandraDaemon.class.getClassLoader().getResource(metricsReporterConfigFile).getFile();
-                ReporterConfig.loadFromFile(reportFileLocation).enableAll(CassandraMetricsRegistry.Metrics);
+                URL resource = CassandraDaemon.class.getClassLoader().getResource(metricsReporterConfigFile);
+                if (resource == null) {
+                    logger.warn("Failed to load metrics-reporter-config, file does not exist: {}", metricsReporterConfigFile);
+                } else {
+                    String reportFileLocation = resource.getFile();
+                    ReporterConfig.loadFromFile(reportFileLocation).enableAll(CassandraMetricsRegistry.Metrics);
+                }
             }
             catch (Exception e)
             {
@@ -362,6 +376,17 @@ public class CassandraDaemon
             System.err.println(e.getMessage() + "\nFatal configuration error; unable to start server.  See log for stacktrace.");
             exitOrFail(1, "Fatal configuration error", e);
         }
+
+        // Because we are writing to the system_distributed keyspace, this should happen after that is created, which
+        // happens in StorageService.instance.initServer()
+        Runnable viewRebuild = () -> {
+            for (Keyspace keyspace : Keyspace.all())
+            {
+                keyspace.viewManager.buildAllViews();
+            }
+        };
+
+        ScheduledExecutors.optionalTasks.schedule(viewRebuild, StorageService.RING_DELAY, TimeUnit.MILLISECONDS);
 
         Mx4jTool.maybeLoad();
 
@@ -431,7 +456,9 @@ public class CassandraDaemon
 	        }
 
 	        logger.info("JVM vendor/version: {}/{}", System.getProperty("java.vm.name"), System.getProperty("java.version"));
-	        logger.info("Heap size: {}/{}", Runtime.getRuntime().totalMemory(), Runtime.getRuntime().maxMemory());
+	        logger.info("Heap size: {}/{}",
+                        FBUtilities.prettyPrintMemory(Runtime.getRuntime().totalMemory()),
+                        FBUtilities.prettyPrintMemory(Runtime.getRuntime().maxMemory()));
 
 	        for(MemoryPoolMXBean pool: ManagementFactory.getMemoryPoolMXBeans())
 	            logger.info("{} {}: {}", pool.getName(), pool.getType(), pool.getPeakUsage());

@@ -47,7 +47,7 @@ public final class UDFByteCodeVerifier
 
     public static final String JAVA_UDF_NAME = JavaUDF.class.getName().replace('.', '/');
     public static final String OBJECT_NAME = Object.class.getName().replace('.', '/');
-    public static final String CTOR_SIG = "(Lcom/datastax/driver/core/TypeCodec;[Lcom/datastax/driver/core/TypeCodec;)V";
+    public static final String CTOR_SIG = "(Lcom/datastax/driver/core/TypeCodec;[Lcom/datastax/driver/core/TypeCodec;Lorg/apache/cassandra/cql3/functions/UDFContext;)V";
 
     private final Set<String> disallowedClasses = new HashSet<>();
     private final Multimap<String, String> disallowedMethodCalls = HashMultimap.create();
@@ -80,8 +80,9 @@ public final class UDFByteCodeVerifier
         return this;
     }
 
-    public Set<String> verify(byte[] bytes)
+    public Set<String> verify(String clsName, byte[] bytes)
     {
+        String clsNameSl = clsName.replace('.', '/');
         Set<String> errors = new TreeSet<>(); // it's a TreeSet for unit tests
         ClassVisitor classVisitor = new ClassVisitor(Opcodes.ASM5)
         {
@@ -134,7 +135,8 @@ public final class UDFByteCodeVerifier
 
             public void visitInnerClass(String name, String outerName, String innerName, int access)
             {
-                errors.add("class declared as inner class");
+                if (clsNameSl.equals(outerName)) // outerName might be null, which is true for anonymous inner classes
+                    errors.add("class declared as inner class");
                 super.visitInnerClass(name, outerName, innerName, access);
             }
         };

@@ -35,7 +35,7 @@ import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.transport.Server;
 
 /**
- * Helper class for User Defined Functions + Aggregates.
+ * Helper class for User Defined Functions, Types and Aggregates.
  */
 public final class UDHelper
 {
@@ -66,7 +66,7 @@ public final class UDHelper
         return codecs;
     }
 
-    static TypeCodec<Object> codecFor(DataType dataType)
+    public static TypeCodec<Object> codecFor(DataType dataType)
     {
         return codecRegistry.codecFor(dataType);
     }
@@ -89,20 +89,19 @@ public final class UDHelper
                 // only care about classes that can be used in a data type
                 Class<?> clazz = typeToken.getRawType();
                 if (clazz == Integer.class)
-                    clazz = int.class;
+                    typeToken = TypeToken.of(int.class);
                 else if (clazz == Long.class)
-                    clazz = long.class;
+                    typeToken = TypeToken.of(long.class);
                 else if (clazz == Byte.class)
-                    clazz = byte.class;
+                    typeToken = TypeToken.of(byte.class);
                 else if (clazz == Short.class)
-                    clazz = short.class;
+                    typeToken = TypeToken.of(short.class);
                 else if (clazz == Float.class)
-                    clazz = float.class;
+                    typeToken = TypeToken.of(float.class);
                 else if (clazz == Double.class)
-                    clazz = double.class;
+                    typeToken = TypeToken.of(double.class);
                 else if (clazz == Boolean.class)
-                    clazz = boolean.class;
-                typeToken = TypeToken.of(clazz);
+                    typeToken = TypeToken.of(boolean.class);
             }
             paramTypes[i] = typeToken;
         }
@@ -130,9 +129,15 @@ public final class UDHelper
     public static DataType driverType(AbstractType abstractType)
     {
         CQL3Type cqlType = abstractType.asCQL3Type();
+        String abstractTypeDef = cqlType.getType().toString();
+        return driverTypeFromAbstractType(abstractTypeDef);
+    }
+
+    public static DataType driverTypeFromAbstractType(String abstractTypeDef)
+    {
         try
         {
-            return (DataType) methodParseOne.invoke(cqlType.getType().toString(),
+            return (DataType) methodParseOne.invoke(abstractTypeDef,
                                                     ProtocolVersion.fromInt(Server.CURRENT_VERSION),
                                                     codecRegistry);
         }
@@ -143,7 +148,7 @@ public final class UDHelper
         }
         catch (Throwable e)
         {
-            throw new RuntimeException("cannot parse driver type " + cqlType.getType().toString(), e);
+            throw new RuntimeException("cannot parse driver type " + abstractTypeDef, e);
         }
     }
 

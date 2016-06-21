@@ -27,6 +27,7 @@ import org.apache.cassandra.schema.SchemaKeyspace;
 
 import static java.lang.String.format;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertThat;
 import static org.junit.Assert.assertTrue;
 
 public class InsertUpdateIfConditionTest extends CQLTester
@@ -188,9 +189,9 @@ public class InsertUpdateIfConditionTest extends CQLTester
         assertRows(execute("DELETE FROM %s WHERE k='k' AND i=0 IF EXISTS"), row(false));
 
         // CASSANDRA-6430
-        assertInvalidMessage("DELETE statements must restrict all PRIMARY KEY columns with equality relations in order to use IF conditions",
+        assertInvalidMessage("DELETE statements must restrict all PRIMARY KEY columns with equality relations in order to delete non static columns",
                              "DELETE FROM %s WHERE k = 'k' IF EXISTS");
-        assertInvalidMessage("DELETE statements must restrict all PRIMARY KEY columns with equality relations in order to use IF conditions",
+        assertInvalidMessage("DELETE statements must restrict all PRIMARY KEY columns with equality relations in order to delete non static columns",
                              "DELETE FROM %s WHERE k = 'k' IF v = 'foo'");
         assertInvalidMessage("Some partition key parts are missing: k",
                              "DELETE FROM %s WHERE i = 0 IF EXISTS");
@@ -199,9 +200,9 @@ public class InsertUpdateIfConditionTest extends CQLTester
                              "DELETE FROM %s WHERE k = 0 AND i > 0 IF EXISTS");
         assertInvalidMessage("Invalid INTEGER constant (0) for \"k\" of type text",
                              "DELETE FROM %s WHERE k = 0 AND i > 0 IF v = 'foo'");
-        assertInvalidMessage("DELETE statements must restrict all PRIMARY KEY columns with equality relations in order to use IF conditions",
+        assertInvalidMessage("DELETE statements must restrict all PRIMARY KEY columns with equality relations in order to delete non static columns",
                              "DELETE FROM %s WHERE k = 'k' AND i > 0 IF EXISTS");
-        assertInvalidMessage("DELETE statements must restrict all PRIMARY KEY columns with equality relations in order to use IF conditions",
+        assertInvalidMessage("DELETE statements must restrict all PRIMARY KEY columns with equality relations in order to delete non static columns",
                              "DELETE FROM %s WHERE k = 'k' AND i > 0 IF v = 'foo'");
         assertInvalidMessage("IN on the clustering key columns is not supported with conditional deletions",
                              "DELETE FROM %s WHERE k = 'k' AND i IN (0, 1) IF v = 'foo'");
@@ -338,6 +339,118 @@ public class InsertUpdateIfConditionTest extends CQLTester
     }
 
     /**
+     * Test CASSANDRA-10532
+     */
+    @Test
+    public void testStaticColumnsCasDelete() throws Throwable
+    {
+        createTable("CREATE TABLE %s (pk int, ck int, static_col int static, value int, PRIMARY KEY (pk, ck))");
+        execute("INSERT INTO %s (pk, ck, value) VALUES (?, ?, ?)", 1, 1, 2);
+        execute("INSERT INTO %s (pk, ck, value) VALUES (?, ?, ?)", 1, 3, 4);
+        execute("INSERT INTO %s (pk, ck, value) VALUES (?, ?, ?)", 1, 5, 6);
+        execute("INSERT INTO %s (pk, ck, value) VALUES (?, ?, ?)", 1, 7, 8);
+        execute("INSERT INTO %s (pk, ck, value) VALUES (?, ?, ?)", 2, 1, 2);
+        execute("INSERT INTO %s (pk, static_col) VALUES (?, ?)", 1, 1);
+
+        assertRows(execute("DELETE static_col FROM %s WHERE pk = ? IF static_col = ?", 1, 2), row(false, 1));
+        assertRows(execute("DELETE static_col FROM %s WHERE pk = ? IF static_col = ?", 1, 1), row(true));
+
+        assertRows(execute("SELECT pk, ck, static_col, value FROM %s WHERE pk = 1"),
+                   row(1, 1, null, 2),
+                   row(1, 3, null, 4),
+                   row(1, 5, null, 6),
+                   row(1, 7, null, 8));
+        execute("INSERT INTO %s (pk, static_col) VALUES (?, ?)", 1, 1);
+
+        assertInvalidMessage("Some partition key parts are missing: pk",
+                             "DELETE static_col FROM %s WHERE ck = ? IF static_col = ?", 1, 1);
+
+        assertInvalidMessage("Invalid restrictions on clustering columns since the DELETE statement modifies only static columns",
+                             "DELETE static_col FROM %s WHERE pk = ? AND ck = ? IF static_col = ?", 1, 1, 1);
+
+        assertInvalidMessage("DELETE statements must restrict all PRIMARY KEY columns with equality relations in order to delete non static columns",
+                             "DELETE static_col, value FROM %s WHERE pk = ? IF static_col = ?", 1, 1);
+
+        // Same query but with an invalid condition
+        assertInvalidMessage("DELETE statements must restrict all PRIMARY KEY columns with equality relations in order to delete non static columns",
+                             "DELETE static_col, value FROM %s WHERE pk = ? IF static_col = ?", 1, 2);
+
+        // DELETE of an underspecified PRIMARY KEY should not succeed if static is not only restriction
+        assertInvalidMessage("DELETE statements must restrict all PRIMARY KEY columns with equality relations" +
+                             " in order to use IF condition on non static columns",
+                             "DELETE static_col FROM %s WHERE pk = ? IF value = ? AND static_col = ?", 1, 2, 1);
+
+        assertRows(execute("DELETE value FROM %s WHERE pk = ? AND ck = ? IF value = ? AND static_col = ?", 1, 1, 2, 2), row(false, 2, 1));
+        assertRows(execute("DELETE value FROM %s WHERE pk = ? AND ck = ? IF value = ? AND static_col = ?", 1, 1, 2, 1), row(true));
+        assertRows(execute("SELECT pk, ck, static_col, value FROM %s WHERE pk = 1"),
+                   row(1, 1, 1, null),
+                   row(1, 3, 1, 4),
+                   row(1, 5, 1, 6),
+                   row(1, 7, 1, 8));
+
+        assertRows(execute("DELETE static_col FROM %s WHERE pk = ? AND ck = ? IF value = ?", 1, 5, 10), row(false, 6));
+        assertRows(execute("DELETE static_col FROM %s WHERE pk = ? AND ck = ? IF value = ?", 1, 5, 6), row(true));
+        assertRows(execute("SELECT pk, ck, static_col, value FROM %s WHERE pk = 1"),
+                   row(1, 1, null, null),
+                   row(1, 3, null, 4),
+                   row(1, 5, null, 6),
+                   row(1, 7, null, 8));
+    }
+
+    @Test
+    public void testStaticColumnsCasUpdate() throws Throwable
+    {
+        createTable("CREATE TABLE %s (pk int, ck int, static_col int static, value int, PRIMARY KEY (pk, ck))");
+        execute("INSERT INTO %s (pk, ck, value) VALUES (?, ?, ?)", 1, 1, 2);
+        execute("INSERT INTO %s (pk, ck, value) VALUES (?, ?, ?)", 1, 3, 4);
+        execute("INSERT INTO %s (pk, ck, value) VALUES (?, ?, ?)", 1, 5, 6);
+        execute("INSERT INTO %s (pk, ck, value) VALUES (?, ?, ?)", 1, 7, 8);
+        execute("INSERT INTO %s (pk, ck, value) VALUES (?, ?, ?)", 2, 1, 2);
+        execute("INSERT INTO %s (pk, static_col) VALUES (?, ?)", 1, 1);
+
+        assertRows(execute("UPDATE %s SET static_col = ? WHERE pk = ? IF static_col = ?", 3, 1, 2), row(false, 1));
+        assertRows(execute("UPDATE %s SET static_col = ? WHERE pk = ? IF static_col = ?", 2, 1, 1), row(true));
+
+        assertRows(execute("SELECT pk, ck, static_col, value FROM %s WHERE pk = 1"),
+                   row(1, 1, 2, 2),
+                   row(1, 3, 2, 4),
+                   row(1, 5, 2, 6),
+                   row(1, 7, 2, 8));
+
+        assertInvalidMessage("Some partition key parts are missing: pk",
+                             "UPDATE %s SET static_col = ? WHERE ck = ? IF static_col = ?", 3, 1, 1);
+
+        assertInvalidMessage("Invalid restrictions on clustering columns since the UPDATE statement modifies only static columns",
+                             "UPDATE %s SET static_col = ? WHERE pk = ? AND ck = ? IF static_col = ?", 3, 1, 1, 1);
+
+        assertInvalidMessage("Some clustering keys are missing: ck",
+                             "UPDATE %s SET static_col = ?, value = ? WHERE pk = ? IF static_col = ?", 3, 1, 1, 2);
+
+        // Same query but with an invalid condition
+        assertInvalidMessage("Some clustering keys are missing: ck",
+                             "UPDATE %s SET static_col = ?, value = ? WHERE pk = ? IF static_col = ?", 3, 1, 1, 1);
+
+        assertInvalidMessage("Some clustering keys are missing: ck",
+                             "UPDATE %s SET static_col = ? WHERE pk = ? IF value = ? AND static_col = ?", 3, 1, 4, 2);
+
+        assertRows(execute("UPDATE %s SET value = ? WHERE pk = ? AND ck = ? IF value = ? AND static_col = ?", 3, 1, 1, 3, 2), row(false, 2, 2));
+        assertRows(execute("UPDATE %s SET value = ? WHERE pk = ? AND ck = ? IF value = ? AND static_col = ?", 1, 1, 1, 2, 2), row(true));
+        assertRows(execute("SELECT pk, ck, static_col, value FROM %s WHERE pk = 1"),
+                   row(1, 1, 2, 1),
+                   row(1, 3, 2, 4),
+                   row(1, 5, 2, 6),
+                   row(1, 7, 2, 8));
+
+        assertRows(execute("UPDATE %s SET static_col = ? WHERE pk = ? AND ck = ? IF value = ?", 3, 1, 1, 2), row(false, 1));
+        assertRows(execute("UPDATE %s SET static_col = ? WHERE pk = ? AND ck = ? IF value = ?", 1, 1, 1, 1), row(true));
+        assertRows(execute("SELECT pk, ck, static_col, value FROM %s WHERE pk = 1"),
+                   row(1, 1, 1, 1),
+                   row(1, 3, 1, 4),
+                   row(1, 5, 1, 6),
+                   row(1, 7, 1, 8));
+    }
+
+    /**
      * Migrated from cql_tests.py:TestCQL.bug_6069_test()
      */
     @Test
@@ -382,6 +495,377 @@ public class InsertUpdateIfConditionTest extends CQLTester
         assertRows(execute("UPDATE %s SET owner='b' WHERE partition='a' AND key='b' IF owner='z'"), row(true));
 
         assertRows(execute("INSERT INTO %s (partition, key, owner) VALUES ('a', 'c', 'x') IF NOT EXISTS"), row(true));
+    }
+
+    @Test
+    public void testWholeUDT() throws Throwable
+    {
+        String typename = createType("CREATE TYPE %s (a int, b text)");
+        String myType = KEYSPACE + '.' + typename;
+
+        for (boolean frozen : new boolean[] {false, true})
+        {
+            createTable(String.format("CREATE TABLE %%s (k int PRIMARY KEY, v %s)",
+                                      frozen
+                                      ? "frozen<" + myType + ">"
+                                      : myType));
+
+            Object v = userType("a", 0, "b", "abc");
+            execute("INSERT INTO %s (k, v) VALUES (0, ?)", v);
+
+            checkAppliesUDT("v = {a: 0, b: 'abc'}", v);
+            checkAppliesUDT("v != null", v);
+            checkAppliesUDT("v != {a: 1, b: 'abc'}", v);
+            checkAppliesUDT("v != {a: 0, b: 'def'}", v);
+            checkAppliesUDT("v > {a: -1, b: 'abc'}", v);
+            checkAppliesUDT("v > {a: 0, b: 'aaa'}", v);
+            checkAppliesUDT("v > {a: 0}", v);
+            checkAppliesUDT("v >= {a: 0, b: 'aaa'}", v);
+            checkAppliesUDT("v >= {a: 0, b: 'abc'}", v);
+            checkAppliesUDT("v < {a: 0, b: 'zzz'}", v);
+            checkAppliesUDT("v < {a: 1, b: 'abc'}", v);
+            checkAppliesUDT("v < {a: 1}", v);
+            checkAppliesUDT("v <= {a: 0, b: 'zzz'}", v);
+            checkAppliesUDT("v <= {a: 0, b: 'abc'}", v);
+            checkAppliesUDT("v IN (null, {a: 0, b: 'abc'}, {a: 1})", v);
+
+            // multiple conditions
+            checkAppliesUDT("v > {a: -1, b: 'abc'} AND v > {a: 0}", v);
+            checkAppliesUDT("v != null AND v IN ({a: 0, b: 'abc'})", v);
+
+            // should not apply
+            checkDoesNotApplyUDT("v = {a: 0, b: 'def'}", v);
+            checkDoesNotApplyUDT("v = {a: 1, b: 'abc'}", v);
+            checkDoesNotApplyUDT("v = null", v);
+            checkDoesNotApplyUDT("v != {a: 0, b: 'abc'}", v);
+            checkDoesNotApplyUDT("v > {a: 1, b: 'abc'}", v);
+            checkDoesNotApplyUDT("v > {a: 0, b: 'zzz'}", v);
+            checkDoesNotApplyUDT("v >= {a: 1, b: 'abc'}", v);
+            checkDoesNotApplyUDT("v >= {a: 0, b: 'zzz'}", v);
+            checkDoesNotApplyUDT("v < {a: -1, b: 'abc'}", v);
+            checkDoesNotApplyUDT("v < {a: 0, b: 'aaa'}", v);
+            checkDoesNotApplyUDT("v <= {a: -1, b: 'abc'}", v);
+            checkDoesNotApplyUDT("v <= {a: 0, b: 'aaa'}", v);
+            checkDoesNotApplyUDT("v IN ({a: 0}, {b: 'abc'}, {a: 0, b: 'def'}, null)", v);
+            checkDoesNotApplyUDT("v IN ()", v);
+
+            // multiple conditions
+            checkDoesNotApplyUDT("v IN () AND v IN ({a: 0, b: 'abc'})", v);
+            checkDoesNotApplyUDT("v > {a: 0, b: 'aaa'} AND v < {a: 0, b: 'aaa'}", v);
+
+            // invalid conditions
+            checkInvalidUDT("v = {a: 1, b: 'abc', c: 'foo'}", v, InvalidRequestException.class);
+            checkInvalidUDT("v = {foo: 'foo'}", v, InvalidRequestException.class);
+            checkInvalidUDT("v < {a: 1, b: 'abc', c: 'foo'}", v, InvalidRequestException.class);
+            checkInvalidUDT("v < null", v, InvalidRequestException.class);
+            checkInvalidUDT("v <= {a: 1, b: 'abc', c: 'foo'}", v, InvalidRequestException.class);
+            checkInvalidUDT("v <= null", v, InvalidRequestException.class);
+            checkInvalidUDT("v > {a: 1, b: 'abc', c: 'foo'}", v, InvalidRequestException.class);
+            checkInvalidUDT("v > null", v, InvalidRequestException.class);
+            checkInvalidUDT("v >= {a: 1, b: 'abc', c: 'foo'}", v, InvalidRequestException.class);
+            checkInvalidUDT("v >= null", v, InvalidRequestException.class);
+            checkInvalidUDT("v IN null", v, SyntaxException.class);
+            checkInvalidUDT("v IN 367", v, SyntaxException.class);
+            checkInvalidUDT("v CONTAINS KEY 123", v, SyntaxException.class);
+            checkInvalidUDT("v CONTAINS 'bar'", v, SyntaxException.class);
+
+
+            /////////////////// null suffix on stored udt ////////////////////
+            v = userType("a", 0, "b", null);
+            execute("INSERT INTO %s (k, v) VALUES (0, ?)", v);
+
+            checkAppliesUDT("v = {a: 0}", v);
+            checkAppliesUDT("v = {a: 0, b: null}", v);
+            checkAppliesUDT("v != null", v);
+            checkAppliesUDT("v != {a: 1, b: null}", v);
+            checkAppliesUDT("v != {a: 1}", v);
+            checkAppliesUDT("v != {a: 0, b: 'def'}", v);
+            checkAppliesUDT("v > {a: -1, b: 'abc'}", v);
+            checkAppliesUDT("v > {a: -1}", v);
+            checkAppliesUDT("v >= {a: 0}", v);
+            checkAppliesUDT("v >= {a: -1, b: 'abc'}", v);
+            checkAppliesUDT("v < {a: 0, b: 'zzz'}", v);
+            checkAppliesUDT("v < {a: 1, b: 'abc'}", v);
+            checkAppliesUDT("v < {a: 1}", v);
+            checkAppliesUDT("v <= {a: 0, b: 'zzz'}", v);
+            checkAppliesUDT("v <= {a: 0}", v);
+            checkAppliesUDT("v IN (null, {a: 0, b: 'abc'}, {a: 0})", v);
+
+            // multiple conditions
+            checkAppliesUDT("v > {a: -1, b: 'abc'} AND v >= {a: 0}", v);
+            checkAppliesUDT("v != null AND v IN ({a: 0}, {a: 0, b: null})", v);
+
+            // should not apply
+            checkDoesNotApplyUDT("v = {a: 0, b: 'def'}", v);
+            checkDoesNotApplyUDT("v = {a: 1}", v);
+            checkDoesNotApplyUDT("v = {b: 'abc'}", v);
+            checkDoesNotApplyUDT("v = null", v);
+            checkDoesNotApplyUDT("v != {a: 0}", v);
+            checkDoesNotApplyUDT("v != {a: 0, b: null}", v);
+            checkDoesNotApplyUDT("v > {a: 1, b: 'abc'}", v);
+            checkDoesNotApplyUDT("v > {a: 0}", v);
+            checkDoesNotApplyUDT("v >= {a: 1, b: 'abc'}", v);
+            checkDoesNotApplyUDT("v >= {a: 1}", v);
+            checkDoesNotApplyUDT("v < {a: -1, b: 'abc'}", v);
+            checkDoesNotApplyUDT("v < {a: -1}", v);
+            checkDoesNotApplyUDT("v < {a: 0}", v);
+            checkDoesNotApplyUDT("v <= {a: -1, b: 'abc'}", v);
+            checkDoesNotApplyUDT("v <= {a: -1}", v);
+            checkDoesNotApplyUDT("v IN ({a: 1}, {b: 'abc'}, {a: 0, b: 'def'}, null)", v);
+            checkDoesNotApplyUDT("v IN ()", v);
+
+            // multiple conditions
+            checkDoesNotApplyUDT("v IN () AND v IN ({a: 0})", v);
+            checkDoesNotApplyUDT("v > {a: -1} AND v < {a: 0}", v);
+
+
+            /////////////////// null prefix on stored udt ////////////////////
+            v = userType("a", null, "b", "abc");
+            execute("INSERT INTO %s (k, v) VALUES (0, ?)", v);
+
+            checkAppliesUDT("v = {a: null, b: 'abc'}", v);
+            checkAppliesUDT("v = {b: 'abc'}", v);
+            checkAppliesUDT("v != null", v);
+            checkAppliesUDT("v != {a: 0, b: 'abc'}", v);
+            checkAppliesUDT("v != {a: 0}", v);
+            checkAppliesUDT("v != {b: 'def'}", v);
+            checkAppliesUDT("v > {a: null, b: 'aaa'}", v);
+            checkAppliesUDT("v > {b: 'aaa'}", v);
+            checkAppliesUDT("v >= {a: null, b: 'aaa'}", v);
+            checkAppliesUDT("v >= {b: 'abc'}", v);
+            checkAppliesUDT("v < {a: null, b: 'zzz'}", v);
+            checkAppliesUDT("v < {a: 0, b: 'abc'}", v);
+            checkAppliesUDT("v < {a: 0}", v);
+            checkAppliesUDT("v < {b: 'zzz'}", v);
+            checkAppliesUDT("v <= {a: null, b: 'zzz'}", v);
+            checkAppliesUDT("v <= {a: 0}", v);
+            checkAppliesUDT("v <= {b: 'abc'}", v);
+            checkAppliesUDT("v IN (null, {a: null, b: 'abc'}, {a: 0})", v);
+            checkAppliesUDT("v IN (null, {a: 0, b: 'abc'}, {b: 'abc'})", v);
+
+            // multiple conditions
+            checkAppliesUDT("v > {b: 'aaa'} AND v >= {b: 'abc'}", v);
+            checkAppliesUDT("v != null AND v IN ({a: 0}, {a: null, b: 'abc'})", v);
+
+            // should not apply
+            checkDoesNotApplyUDT("v = {a: 0, b: 'def'}", v);
+            checkDoesNotApplyUDT("v = {a: 1}", v);
+            checkDoesNotApplyUDT("v = {b: 'def'}", v);
+            checkDoesNotApplyUDT("v = null", v);
+            checkDoesNotApplyUDT("v != {b: 'abc'}", v);
+            checkDoesNotApplyUDT("v != {a: null, b: 'abc'}", v);
+            checkDoesNotApplyUDT("v > {a: 1, b: 'abc'}", v);
+            checkDoesNotApplyUDT("v > {a: null, b: 'zzz'}", v);
+            checkDoesNotApplyUDT("v > {b: 'zzz'}", v);
+            checkDoesNotApplyUDT("v >= {a: null, b: 'zzz'}", v);
+            checkDoesNotApplyUDT("v >= {a: 1}", v);
+            checkDoesNotApplyUDT("v >= {b: 'zzz'}", v);
+            checkDoesNotApplyUDT("v < {a: null, b: 'aaa'}", v);
+            checkDoesNotApplyUDT("v < {b: 'aaa'}", v);
+            checkDoesNotApplyUDT("v <= {a: null, b: 'aaa'}", v);
+            checkDoesNotApplyUDT("v <= {b: 'aaa'}", v);
+            checkDoesNotApplyUDT("v IN ({a: 1}, {a: 1, b: 'abc'}, {a: null, b: 'def'}, null)", v);
+            checkDoesNotApplyUDT("v IN ()", v);
+
+            // multiple conditions
+            checkDoesNotApplyUDT("v IN () AND v IN ({b: 'abc'})", v);
+            checkDoesNotApplyUDT("v IN () AND v IN ({a: null, b: 'abc'})", v);
+            checkDoesNotApplyUDT("v > {a: -1} AND v < {a: 0}", v);
+
+
+            /////////////////// null udt ////////////////////
+            v = null;
+            execute("INSERT INTO %s (k, v) VALUES (0, ?)", v);
+
+            checkAppliesUDT("v = null", v);
+            checkAppliesUDT("v IN (null, {a: null, b: 'abc'}, {a: 0})", v);
+            checkAppliesUDT("v IN (null, {a: 0, b: 'abc'}, {b: 'abc'})", v);
+
+            // multiple conditions
+            checkAppliesUDT("v = null AND v IN (null, {a: 0}, {a: null, b: 'abc'})", v);
+
+            // should not apply
+            checkDoesNotApplyUDT("v = {a: 0, b: 'def'}", v);
+            checkDoesNotApplyUDT("v = {a: 1}", v);
+            checkDoesNotApplyUDT("v = {b: 'def'}", v);
+            checkDoesNotApplyUDT("v != null", v);
+            checkDoesNotApplyUDT("v > {a: 1, b: 'abc'}", v);
+            checkDoesNotApplyUDT("v > {a: null, b: 'zzz'}", v);
+            checkDoesNotApplyUDT("v > {b: 'zzz'}", v);
+            checkDoesNotApplyUDT("v >= {a: null, b: 'zzz'}", v);
+            checkDoesNotApplyUDT("v >= {a: 1}", v);
+            checkDoesNotApplyUDT("v >= {b: 'zzz'}", v);
+            checkDoesNotApplyUDT("v < {a: null, b: 'aaa'}", v);
+            checkDoesNotApplyUDT("v < {b: 'aaa'}", v);
+            checkDoesNotApplyUDT("v <= {a: null, b: 'aaa'}", v);
+            checkDoesNotApplyUDT("v <= {b: 'aaa'}", v);
+            checkDoesNotApplyUDT("v IN ({a: 1}, {a: 1, b: 'abc'}, {a: null, b: 'def'})", v);
+            checkDoesNotApplyUDT("v IN ()", v);
+
+            // multiple conditions
+            checkDoesNotApplyUDT("v IN () AND v IN ({b: 'abc'})", v);
+            checkDoesNotApplyUDT("v > {a: -1} AND v < {a: 0}", v);
+
+        }
+    }
+
+    @Test
+    public void testUDTField() throws Throwable
+    {
+        String typename = createType("CREATE TYPE %s (a int, b text)");
+        String myType = KEYSPACE + '.' + typename;
+
+        for (boolean frozen : new boolean[] {false, true})
+        {
+            createTable(String.format("CREATE TABLE %%s (k int PRIMARY KEY, v %s)",
+                                      frozen
+                                      ? "frozen<" + myType + ">"
+                                      : myType));
+
+            Object v = userType("a", 0, "b", "abc");
+            execute("INSERT INTO %s (k, v) VALUES (0, ?)", v);
+
+            checkAppliesUDT("v.a = 0", v);
+            checkAppliesUDT("v.b = 'abc'", v);
+            checkAppliesUDT("v.a < 1", v);
+            checkAppliesUDT("v.b < 'zzz'", v);
+            checkAppliesUDT("v.b <= 'bar'", v);
+            checkAppliesUDT("v.b > 'aaa'", v);
+            checkAppliesUDT("v.b >= 'abc'", v);
+            checkAppliesUDT("v.a != -1", v);
+            checkAppliesUDT("v.b != 'xxx'", v);
+            checkAppliesUDT("v.a != null", v);
+            checkAppliesUDT("v.b != null", v);
+            checkAppliesUDT("v.a IN (null, 0, 1)", v);
+            checkAppliesUDT("v.b IN (null, 'xxx', 'abc')", v);
+            checkAppliesUDT("v.b > 'aaa' AND v.b < 'zzz'", v);
+            checkAppliesUDT("v.a = 0 AND v.b > 'aaa'", v);
+
+            // do not apply
+            checkDoesNotApplyUDT("v.a = -1", v);
+            checkDoesNotApplyUDT("v.b = 'xxx'", v);
+            checkDoesNotApplyUDT("v.a < -1", v);
+            checkDoesNotApplyUDT("v.b < 'aaa'", v);
+            checkDoesNotApplyUDT("v.b <= 'aaa'", v);
+            checkDoesNotApplyUDT("v.b > 'zzz'", v);
+            checkDoesNotApplyUDT("v.b >= 'zzz'", v);
+            checkDoesNotApplyUDT("v.a != 0", v);
+            checkDoesNotApplyUDT("v.b != 'abc'", v);
+            checkDoesNotApplyUDT("v.a IN (null, -1)", v);
+            checkDoesNotApplyUDT("v.b IN (null, 'xxx')", v);
+            checkDoesNotApplyUDT("v.a IN ()", v);
+            checkDoesNotApplyUDT("v.b IN ()", v);
+            checkDoesNotApplyUDT("v.b != null AND v.b IN ()", v);
+
+            // invalid
+            checkInvalidUDT("v.c = null", v, InvalidRequestException.class);
+            checkInvalidUDT("v.a < null", v, InvalidRequestException.class);
+            checkInvalidUDT("v.a <= null", v, InvalidRequestException.class);
+            checkInvalidUDT("v.a > null", v, InvalidRequestException.class);
+            checkInvalidUDT("v.a >= null", v, InvalidRequestException.class);
+            checkInvalidUDT("v.a IN null", v, SyntaxException.class);
+            checkInvalidUDT("v.a IN 367", v, SyntaxException.class);
+            checkInvalidUDT("v.b IN (1, 2, 3)", v, InvalidRequestException.class);
+            checkInvalidUDT("v.a CONTAINS 367", v, SyntaxException.class);
+            checkInvalidUDT("v.a CONTAINS KEY 367", v, SyntaxException.class);
+
+
+            /////////////// null suffix on udt ////////////////
+            v = userType("a", 0, "b", null);
+            execute("INSERT INTO %s (k, v) VALUES (0, ?)", v);
+
+            checkAppliesUDT("v.a = 0", v);
+            checkAppliesUDT("v.b = null", v);
+            checkAppliesUDT("v.b != 'xxx'", v);
+            checkAppliesUDT("v.a != null", v);
+            checkAppliesUDT("v.a IN (null, 0, 1)", v);
+            checkAppliesUDT("v.b IN (null, 'xxx', 'abc')", v);
+            checkAppliesUDT("v.a = 0 AND v.b = null", v);
+
+            // do not apply
+            checkDoesNotApplyUDT("v.b = 'abc'", v);
+            checkDoesNotApplyUDT("v.a < -1", v);
+            checkDoesNotApplyUDT("v.b < 'aaa'", v);
+            checkDoesNotApplyUDT("v.b <= 'aaa'", v);
+            checkDoesNotApplyUDT("v.b > 'zzz'", v);
+            checkDoesNotApplyUDT("v.b >= 'zzz'", v);
+            checkDoesNotApplyUDT("v.a != 0", v);
+            checkDoesNotApplyUDT("v.b != null", v);
+            checkDoesNotApplyUDT("v.a IN (null, -1)", v);
+            checkDoesNotApplyUDT("v.b IN ('xxx', 'abc')", v);
+            checkDoesNotApplyUDT("v.a IN ()", v);
+            checkDoesNotApplyUDT("v.b IN ()", v);
+            checkDoesNotApplyUDT("v.b != null AND v.b IN ()", v);
+
+
+            /////////////// null prefix on udt ////////////////
+            v = userType("a", null, "b", "abc");
+            execute("INSERT INTO %s (k, v) VALUES (0, ?)", v);
+
+            checkAppliesUDT("v.a = null", v);
+            checkAppliesUDT("v.b = 'abc'", v);
+            checkAppliesUDT("v.a != 0", v);
+            checkAppliesUDT("v.b != null", v);
+            checkAppliesUDT("v.a IN (null, 0, 1)", v);
+            checkAppliesUDT("v.b IN (null, 'xxx', 'abc')", v);
+            checkAppliesUDT("v.a = null AND v.b = 'abc'", v);
+
+            // do not apply
+            checkDoesNotApplyUDT("v.a = 0", v);
+            checkDoesNotApplyUDT("v.a < -1", v);
+            checkDoesNotApplyUDT("v.b >= 'zzz'", v);
+            checkDoesNotApplyUDT("v.a != null", v);
+            checkDoesNotApplyUDT("v.b != 'abc'", v);
+            checkDoesNotApplyUDT("v.a IN (-1, 0)", v);
+            checkDoesNotApplyUDT("v.b IN (null, 'xxx')", v);
+            checkDoesNotApplyUDT("v.a IN ()", v);
+            checkDoesNotApplyUDT("v.b IN ()", v);
+            checkDoesNotApplyUDT("v.b != null AND v.b IN ()", v);
+
+
+            /////////////// null udt ////////////////
+            v = null;
+            execute("INSERT INTO %s (k, v) VALUES (0, ?)", v);
+
+            checkAppliesUDT("v.a = null", v);
+            checkAppliesUDT("v.b = null", v);
+            checkAppliesUDT("v.a != 0", v);
+            checkAppliesUDT("v.b != 'abc'", v);
+            checkAppliesUDT("v.a IN (null, 0, 1)", v);
+            checkAppliesUDT("v.b IN (null, 'xxx', 'abc')", v);
+            checkAppliesUDT("v.a = null AND v.b = null", v);
+
+            // do not apply
+            checkDoesNotApplyUDT("v.a = 0", v);
+            checkDoesNotApplyUDT("v.a < -1", v);
+            checkDoesNotApplyUDT("v.b >= 'zzz'", v);
+            checkDoesNotApplyUDT("v.a != null", v);
+            checkDoesNotApplyUDT("v.b != null", v);
+            checkDoesNotApplyUDT("v.a IN (-1, 0)", v);
+            checkDoesNotApplyUDT("v.b IN ('xxx', 'abc')", v);
+            checkDoesNotApplyUDT("v.a IN ()", v);
+            checkDoesNotApplyUDT("v.b IN ()", v);
+            checkDoesNotApplyUDT("v.b != null AND v.b IN ()", v);
+        }
+    }
+
+    void checkAppliesUDT(String condition, Object value) throws Throwable
+    {
+        assertRows(execute("UPDATE %s SET v = ? WHERE k = 0 IF " + condition, value), row(true));
+        assertRows(execute("SELECT * FROM %s"), row(0, value));
+    }
+
+    void checkDoesNotApplyUDT(String condition, Object value) throws Throwable
+    {
+        assertRows(execute("UPDATE %s SET v = ? WHERE k = 0 IF " + condition, value),
+                   row(false, value));
+        assertRows(execute("SELECT * FROM %s"), row(0, value));
+    }
+
+    void checkInvalidUDT(String condition, Object value, Class<? extends Throwable> expected) throws Throwable
+    {
+        assertInvalidThrow(expected, "UPDATE %s SET v = ?  WHERE k = 0 IF " + condition, value);
+        assertRows(execute("SELECT * FROM %s"), row(0, value));
     }
 
     /**
@@ -911,5 +1395,294 @@ public class InsertUpdateIfConditionTest extends CQLTester
                                    SchemaKeyspace.TYPES),
                             KEYSPACE,
                             "mytype"));
+    }
+
+    @Test
+    public void testConditionalUpdatesOnStaticColumns() throws Throwable
+    {
+        createTable("CREATE TABLE %s (a int, b int, s int static, d text, PRIMARY KEY (a, b))");
+
+        // pre-existing row
+        execute("INSERT INTO %s (a, b, s, d) values (6, 6, 100, 'a')");
+        assertRows(execute("UPDATE %s SET s = 6 WHERE a = 6 IF s = 100"),
+                   row(true));
+        assertRows(execute("SELECT * FROM %s WHERE a = 6"),
+                   row(6, 6, 6, "a"));
+
+        // pre-existing row with null in the static column
+        execute("INSERT INTO %s (a, b, d) values (7, 7, 'a')");
+        assertRows(execute("UPDATE %s SET s = 7 WHERE a = 7 IF s = NULL"),
+                   row(true));
+        assertRows(execute("SELECT * FROM %s WHERE a = 7"),
+                   row(7, 7, 7, "a"));
+
+        // deleting row before CAS
+        execute("DELETE FROM %s WHERE a = 8;");
+        assertRows(execute("UPDATE %s SET s = 8 WHERE a = 8 IF s = NULL"),
+                   row(true));
+        assertRows(execute("SELECT * FROM %s WHERE a = 8"),
+                   row(8, null, 8, null));
+    }
+
+    @Test
+    public void testConditionalUpdatesWithNullValues() throws Throwable
+    {
+        createTable("CREATE TABLE %s (a int, b int, s int static, d text, PRIMARY KEY (a, b))");
+
+        // pre-populate, leave out static column
+        for (int i = 1; i <= 5; i++)
+            execute("INSERT INTO %s (a, b) VALUES (?, ?)", i, i);
+
+        conditionalUpdatesWithNonExistingOrNullValues();
+
+        // rejected: IN doesn't contain null
+        assertRows(execute("UPDATE %s SET s = 30 WHERE a = 3 IF s IN (10,20,30)"),
+                   row(false));
+        assertRows(execute("SELECT * FROM %s WHERE a = 3"),
+                   row(3, 3, null, null));
+
+        // rejected: comparing number with NULL always returns false
+        for (String operator: new String[] { ">", "<", ">=", "<=", "="})
+        {
+            assertRows(execute("UPDATE %s SET s = 50 WHERE a = 5 IF s " + operator + " 3"),
+                       row(false));
+            assertRows(execute("SELECT * FROM %s WHERE a = 5"),
+                       row(5, 5, null, null));
+        }
+
+    }
+
+    @Test
+    public void testConditionalUpdatesWithNonExistingValues() throws Throwable
+    {
+        createTable("CREATE TABLE %s (a int, b int, s int static, d text, PRIMARY KEY (a, b))");
+
+        conditionalUpdatesWithNonExistingOrNullValues();
+
+        // rejected: IN doesn't contain null
+        assertRows(execute("UPDATE %s SET s = 3 WHERE a = 3 IF s IN (10,20,30)"),
+                   row(false));
+        assertEmpty(execute("SELECT a, s, d FROM %s WHERE a = 3"));
+
+        // rejected: comparing number with NULL always returns false
+        for (String operator : new String[]{ ">", "<", ">=", "<=", "=" })
+        {
+            assertRows(execute("UPDATE %s SET s = 50 WHERE a = 5 IF s " + operator + " 3"),
+                       row(false));
+            assertEmpty(execute("SELECT * FROM %s WHERE a = 5"));
+        }
+    }
+
+    private void conditionalUpdatesWithNonExistingOrNullValues() throws Throwable
+    {
+        assertRows(execute("UPDATE %s SET s = 1 WHERE a = 1 IF s = NULL"),
+                   row(true));
+        assertRows(execute("SELECT a, s, d FROM %s WHERE a = 1"),
+                   row(1, 1, null));
+
+        assertRows(execute("UPDATE %s SET s = 2 WHERE a = 2 IF s IN (10,20,NULL)"),
+                   row(true));
+        assertRows(execute("SELECT a, s, d FROM %s WHERE a = 2"),
+                   row(2, 2, null));
+
+        assertRows(execute("UPDATE %s SET s = 4 WHERE a = 4 IF s != 4"),
+                   row(true));
+        assertRows(execute("SELECT a, s, d FROM %s WHERE a = 4"),
+                   row(4, 4, null));
+    }
+
+    @Test
+    public void testConditionalUpdatesWithNullValuesWithBatch() throws Throwable
+    {
+        createTable("CREATE TABLE %s (a int, b int, s int static, d text, PRIMARY KEY (a, b))");
+
+        // pre-populate, leave out static column
+        for (int i = 1; i <= 6; i++)
+            execute("INSERT INTO %s (a, b) VALUES (?, ?)", i, i);
+
+        testConditionalUpdatesWithNonExistingOrNullValuesWithBatch();
+
+        // rejected: comparing number with null value always returns false
+        for (String operator: new String[] { ">", "<", ">=", "<=", "="})
+        {
+            assertRows(execute("BEGIN BATCH\n"
+                               + "INSERT INTO %1$s (a, b, s, d) values (3, 3, 40, 'a');\n"
+                               + "UPDATE %1$s SET s = 30 WHERE a = 3 IF s " + operator + " 5;\n"
+                               + "APPLY BATCH"),
+                       row(false));
+            assertRows(execute("SELECT * FROM %s WHERE a = 3"),
+                       row(3, 3, null, null));
+        }
+
+        // rejected: IN doesn't contain null
+        assertRows(execute("BEGIN BATCH\n"
+                           + "INSERT INTO %1$s (a, b, s, d) values (6, 6, 70, 'a');\n"
+                           + "UPDATE %1$s SET s = 60 WHERE a = 6 IF s IN (1,2,3);\n"
+                           + "APPLY BATCH"),
+                   row(false));
+        assertRows(execute("SELECT * FROM %s WHERE a = 6"),
+                   row(6, 6, null, null));
+
+    }
+
+    @Test
+    public void testConditionalUpdatesWithNonExistingValuesWithBatch() throws Throwable
+    {
+        createTable("CREATE TABLE %s (a int, b int, s int static, d text, PRIMARY KEY (a, b))");
+
+        testConditionalUpdatesWithNonExistingOrNullValuesWithBatch();
+
+        // rejected: comparing number with non-existing value always returns false
+        for (String operator: new String[] { ">", "<", ">=", "<=", "="})
+        {
+            assertRows(execute("BEGIN BATCH\n"
+                               + "INSERT INTO %1$s (a, b, s, d) values (3, 3, 3, 'a');\n"
+                               + "UPDATE %1$s SET s = 3 WHERE a = 3 IF s " + operator + " 5;\n"
+                               + "APPLY BATCH"),
+                       row(false));
+            assertEmpty(execute("SELECT * FROM %s WHERE a = 3"));
+        }
+
+        // rejected: IN doesn't contain null
+        assertRows(execute("BEGIN BATCH\n"
+                           + "INSERT INTO %1$s (a, b, s, d) values (6, 6, 6, 'a');\n"
+                           + "UPDATE %1$s SET s = 7 WHERE a = 6 IF s IN (1,2,3);\n"
+                           + "APPLY BATCH"),
+                   row(false));
+        assertEmpty(execute("SELECT * FROM %s WHERE a = 6"));
+    }
+
+    private void testConditionalUpdatesWithNonExistingOrNullValuesWithBatch() throws Throwable
+    {
+        // applied: null is indistiguishable from empty value, lwt condition is executed before INSERT
+        assertRows(execute("BEGIN BATCH\n"
+                           + "INSERT INTO %1$s (a, b, d) values (2, 2, 'a');\n"
+                           + "UPDATE %1$s SET s = 2 WHERE a = 2 IF s = null;\n"
+                           + "APPLY BATCH"),
+                   row(true));
+        assertRows(execute("SELECT * FROM %s WHERE a = 2"),
+                   row(2, 2, 2, "a"));
+
+        // applied: lwt condition is executed before INSERT, update is applied after it
+        assertRows(execute("BEGIN BATCH\n"
+                           + "INSERT INTO %1$s (a, b, s, d) values (4, 4, 4, 'a');\n"
+                           + "UPDATE %1$s SET s = 5 WHERE a = 4 IF s = null;\n"
+                           + "APPLY BATCH"),
+                   row(true));
+        assertRows(execute("SELECT * FROM %s WHERE a = 4"),
+                   row(4, 4, 5, "a"));
+
+        assertRows(execute("BEGIN BATCH\n"
+                           + "INSERT INTO %1$s (a, b, s, d) values (5, 5, 5, 'a');\n"
+                           + "UPDATE %1$s SET s = 6 WHERE a = 5 IF s IN (1,2,null);\n"
+                           + "APPLY BATCH"),
+                   row(true));
+        assertRows(execute("SELECT * FROM %s WHERE a = 5"),
+                   row(5, 5, 6, "a"));
+
+        assertRows(execute("BEGIN BATCH\n"
+                           + "INSERT INTO %1$s (a, b, s, d) values (7, 7, 7, 'a');\n"
+                           + "UPDATE %1$s SET s = 8 WHERE a = 7 IF s != 7;\n"
+                           + "APPLY BATCH"),
+                   row(true));
+        assertRows(execute("SELECT * FROM %s WHERE a = 7"),
+                   row(7, 7, 8, "a"));
+    }
+
+    @Test
+    public void testConditionalDeleteWithNullValues() throws Throwable
+    {
+        createTable("CREATE TABLE %s (a int, b int, s1 int static, s2 int static, v int, PRIMARY KEY (a, b))");
+
+        for (int i = 1; i <= 5; i++)
+            execute("INSERT INTO %s (a, b, s1, s2, v) VALUES (?, ?, ?, ?, ?)", i, i, i, null, i);
+
+        assertRows(execute("DELETE s1 FROM %s WHERE a = 1 IF s2 = NULL"),
+                   row(true));
+        assertRows(execute("SELECT * FROM %s WHERE a = 1"),
+                   row(1, 1, null, null, 1));
+
+        // rejected: IN doesn't contain null
+        assertRows(execute("DELETE s1 FROM %s WHERE a = 2 IF s2 IN (10,20,30)"),
+                   row(false));
+        assertRows(execute("SELECT * FROM %s WHERE a = 2"),
+                   row(2, 2, 2, null, 2));
+
+        assertRows(execute("DELETE s1 FROM %s WHERE a = 3 IF s2 IN (NULL,20,30)"),
+                   row(true));
+        assertRows(execute("SELECT * FROM %s WHERE a = 3"),
+                   row(3, 3, null, null, 3));
+
+        assertRows(execute("DELETE s1 FROM %s WHERE a = 4 IF s2 != 4"),
+                   row(true));
+        assertRows(execute("SELECT * FROM %s WHERE a = 4"),
+                   row(4, 4, null, null, 4));
+
+        // rejected: comparing number with NULL always returns false
+        for (String operator : new String[]{ ">", "<", ">=", "<=", "=" })
+        {
+            assertRows(execute("DELETE s1 FROM %s WHERE a = 5 IF s2 " + operator + " 3"),
+                       row(false));
+            assertRows(execute("SELECT * FROM %s WHERE a = 5"),
+                       row(5, 5, 5, null, 5));
+        }
+    }
+
+    @Test
+    public void testConditionalDeletesWithNonExistingValuesWithBatch() throws Throwable
+    {
+        createTable("CREATE TABLE %s (a int, b int, s1 int static, s2 int static, v int, PRIMARY KEY (a, b))");
+
+        // applied: null is indistiguishable from empty value, lwt condition is executed before INSERT
+        assertRows(execute("BEGIN BATCH\n"
+                           + "INSERT INTO %1$s (a, b, s1, v) values (2, 2, 2, 2);\n"
+                           + "DELETE s1 FROM %1$s WHERE a = 2 IF s2 = null;\n"
+                           + "APPLY BATCH"),
+                   row(true));
+        assertRows(execute("SELECT * FROM %s WHERE a = 2"),
+                   row(2, 2, null, null, 2));
+
+        // rejected: comparing number with non-existing value always returns false
+        for (String operator: new String[] { ">", "<", ">=", "<=", "="})
+        {
+            assertRows(execute("BEGIN BATCH\n"
+                               + "INSERT INTO %1$s (a, b, s1, v) values (3, 3, 3, 3);\n"
+                               + "DELETE s1 FROM %1$s WHERE a = 3 IF s2 " + operator + " 5;\n"
+                               + "APPLY BATCH"),
+                       row(false));
+            assertEmpty(execute("SELECT * FROM %s WHERE a = 3"));
+        }
+
+        // rejected: IN doesn't contain null
+        assertRows(execute("BEGIN BATCH\n"
+                           + "INSERT INTO %1$s (a, b, s1, v) values (6, 6, 6, 6);\n"
+                           + "DELETE s1 FROM %1$s WHERE a = 6 IF s2 IN (1,2,3);\n"
+                           + "APPLY BATCH"),
+                   row(false));
+        assertEmpty(execute("SELECT * FROM %s WHERE a = 6"));
+
+        assertRows(execute("BEGIN BATCH\n"
+                           + "INSERT INTO %1$s (a, b, s1, v) values (4, 4, 4, 4);\n"
+                           + "DELETE s1 FROM %1$s WHERE a = 4 IF s2 = null;\n"
+                           + "APPLY BATCH"),
+                   row(true));
+        assertRows(execute("SELECT * FROM %s WHERE a = 4"),
+                   row(4, 4, null, null, 4));
+
+        assertRows(execute("BEGIN BATCH\n"
+                           + "INSERT INTO %1$s (a, b, s1, v) VALUES (5, 5, 5, 5);\n"
+                           + "DELETE s1 FROM %1$s WHERE a = 5 IF s1 IN (1,2,null);\n"
+                           + "APPLY BATCH"),
+                   row(true));
+        assertRows(execute("SELECT * FROM %s WHERE a = 5"),
+                   row(5, 5, null, null, 5));
+
+        assertRows(execute("BEGIN BATCH\n"
+                           + "INSERT INTO %1$s (a, b, s1, v) values (7, 7, 7, 7);\n"
+                           + "DELETE s1 FROM %1$s WHERE a = 7 IF s2 != 7;\n"
+                           + "APPLY BATCH"),
+                   row(true));
+        assertRows(execute("SELECT * FROM %s WHERE a = 7"),
+                   row(7, 7, null, null, 7));
     }
 }

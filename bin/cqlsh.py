@@ -177,7 +177,7 @@ from cqlshlib.util import get_file_encoding_bomsize, trim_if_present
 DEFAULT_HOST = '127.0.0.1'
 DEFAULT_PORT = 9042
 DEFAULT_SSL = False
-DEFAULT_CQLVER = '3.4.0'
+DEFAULT_CQLVER = '3.4.2'
 DEFAULT_PROTOCOL_VERSION = 4
 DEFAULT_CONNECT_TIMEOUT_SECONDS = 5
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 10
@@ -267,8 +267,8 @@ if os.path.exists(OLD_HISTORY):
 # END history/config definition
 
 CQL_ERRORS = (
-    cassandra.AlreadyExists, cassandra.AuthenticationFailed, cassandra.InvalidRequest,
-    cassandra.Timeout, cassandra.Unauthorized, cassandra.OperationTimedOut,
+    cassandra.AlreadyExists, cassandra.AuthenticationFailed, cassandra.CoordinationFailure,
+    cassandra.InvalidRequest, cassandra.Timeout, cassandra.Unauthorized, cassandra.OperationTimedOut,
     cassandra.cluster.NoHostAvailable,
     cassandra.connection.ConnectionBusy, cassandra.connection.ProtocolError, cassandra.connection.ConnectionException,
     cassandra.protocol.ErrorMessage, cassandra.protocol.InternalError, cassandra.query.TraceUnavailable
@@ -879,7 +879,7 @@ class Shell(cmd.Cmd):
         if ksname is None:
             ksname = self.current_keyspace
         layout = self.get_table_meta(ksname, cfname)
-        return [str(col) for col in layout.columns]
+        return [unicode(col) for col in layout.columns]
 
     def get_usertype_names(self, ksname=None):
         if ksname is None:
@@ -898,8 +898,7 @@ class Shell(cmd.Cmd):
         except KeyError:
             raise UserTypeNotFound("User type %r not found" % typename)
 
-        return [(field_name, field_type.cql_parameterized_type())
-                for field_name, field_type in zip(user_type.field_names, user_type.field_types)]
+        return zip(user_type.field_names, user_type.field_types)
 
     def get_userfunction_names(self, ksname=None):
         if ksname is None:
@@ -1117,7 +1116,7 @@ class Shell(cmd.Cmd):
                 except EOFError:
                     self.handle_eof()
                 except CQL_ERRORS, cqlerr:
-                    self.printerr(str(cqlerr))
+                    self.printerr(unicode(cqlerr))
                 except KeyboardInterrupt:
                     self.reset_statement()
                     print
@@ -1279,10 +1278,10 @@ class Shell(cmd.Cmd):
                 break
             except cassandra.OperationTimedOut, err:
                 self.refresh_schema_metadata_best_effort()
-                self.printerr(str(err.__class__.__name__) + ": " + str(err))
+                self.printerr(unicode(err.__class__.__name__) + u": " + unicode(err))
                 return False, None
             except CQL_ERRORS, err:
-                self.printerr(str(err.__class__.__name__) + ": " + str(err))
+                self.printerr(unicode(err.__class__.__name__) + u": " + unicode(err))
                 return False, None
             except Exception, err:
                 import traceback
@@ -1854,7 +1853,7 @@ class Shell(cmd.Cmd):
           SKIPROWS=0              - the number of rows to skip
           SKIPCOLS=''             - a comma separated list of column names to skip
           MAXPARSEERRORS=-1       - the maximum global number of parsing errors, -1 means no maximum
-          MAXINSERTERRORS=-1      - the maximum global number of insert errors, -1 means no maximum
+          MAXINSERTERRORS=1000    - the maximum global number of insert errors, -1 means no maximum
           ERRFILE=''              - a file where to store all rows that could not be imported, by default this is
                                     import_ks_table.err where <ks> is your keyspace and <table> is your table name.
           PREPAREDSTATEMENTS=True - whether to use prepared statements when importing, by default True. Set this to
@@ -1978,6 +1977,7 @@ class Shell(cmd.Cmd):
         subshell = Shell(self.hostname, self.port,
                          color=self.color, encoding=self.encoding, stdin=f,
                          tty=False, use_conn=self.conn, cqlver=self.cql_version,
+                         keyspace=self.current_keyspace,
                          display_timestamp_format=self.display_timestamp_format,
                          display_date_format=self.display_date_format,
                          display_nanotime_format=self.display_nanotime_format,
@@ -2301,7 +2301,16 @@ class Shell(cmd.Cmd):
     def writeresult(self, text, color=None, newline=True, out=None):
         if out is None:
             out = self.query_out
-        out.write(self.applycolor(str(text), color) + ('\n' if newline else ''))
+
+        # convert Exceptions, etc to text
+        if not isinstance(text, (unicode, str)):
+            text = unicode(text)
+
+        if isinstance(text, unicode):
+            text = text.encode(self.encoding)
+
+        to_write = self.applycolor(text, color) + ('\n' if newline else '')
+        out.write(to_write)
 
     def flush_output(self):
         self.query_out.flush()

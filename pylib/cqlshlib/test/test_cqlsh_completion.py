@@ -367,12 +367,12 @@ class TestCqlshCompletion(CqlshCompletionCase):
                             choices=['EXISTS', '<quotedName>', '<identifier>'])
 
         self.trycompletions("UPDATE empty_table SET lonelycol = 'eggs' WHERE TOKEN(lonelykey) <= TOKEN(13) IF EXISTS ",
-                            choices=['>=', '!=', '<=', 'IN', '[', ';', '=', '<', '>'])
+                            choices=['>=', '!=', '<=', 'IN', '[', ';', '=', '<', '>', '.'])
 
     def test_complete_in_delete(self):
         self.trycompletions('DELETE F', choices=['FROM', '<identifier>', '<quotedName>'])
 
-        self.trycompletions('DELETE a ', choices=['FROM', '[', ','])
+        self.trycompletions('DELETE a ', choices=['FROM', '[', '.', ','])
         self.trycompletions('DELETE a [',
                             choices=['<wholenumber>', 'false', '-', '<uuid>',
                                      '<pgStringLiteral>', '<float>', 'TOKEN',
@@ -449,7 +449,7 @@ class TestCqlshCompletion(CqlshCompletionCase):
                             choices=['EXISTS', '<identifier>', '<quotedName>'])
         self.trycompletions(('DELETE FROM twenty_rows_composite_table USING TIMESTAMP 0 WHERE '
                              'TOKEN(a) >= TOKEN(0) IF b '),
-                            choices=['>=', '!=', '<=', 'IN', '[', '=', '<', '>'])
+                            choices=['>=', '!=', '<=', 'IN', '=', '<', '>'])
         self.trycompletions(('DELETE FROM twenty_rows_composite_table USING TIMESTAMP 0 WHERE '
                              'TOKEN(a) >= TOKEN(0) IF b < 0 '),
                             choices=['AND', ';'])
@@ -617,7 +617,8 @@ class TestCqlshCompletion(CqlshCompletionCase):
                             + "{'class': '",
                             choices=['SizeTieredCompactionStrategy',
                                      'LeveledCompactionStrategy',
-                                     'DateTieredCompactionStrategy'])
+                                     'DateTieredCompactionStrategy',
+                                     'TimeWindowCompactionStrategy'])
         self.trycompletions(prefix + " new_table (col_a int PRIMARY KEY) WITH compaction = "
                             + "{'class': 'S",
                             immediate="izeTieredCompactionStrategy'")
@@ -660,6 +661,14 @@ class TestCqlshCompletion(CqlshCompletionCase):
                                      'tombstone_compaction_interval', 'tombstone_threshold',
                                      'enabled', 'unchecked_tombstone_compaction',
                                      'max_window_size_seconds', 'only_purge_repaired_tombstones'])
+        self.trycompletions(prefix + " new_table (col_a int PRIMARY KEY) WITH compaction = "
+                            + "{'class': 'TimeWindowCompactionStrategy', '",
+                            choices=['compaction_window_unit', 'compaction_window_size',
+                                     'timestamp_resolution', 'min_threshold', 'class', 'max_threshold',
+                                     'tombstone_compaction_interval', 'tombstone_threshold',
+                                     'enabled', 'unchecked_tombstone_compaction',
+                                     'only_purge_repaired_tombstones'])
+
 
     def test_complete_in_create_columnfamily(self):
         self.trycompletions('CREATE C', choices=['COLUMNFAMILY', 'CUSTOM'])

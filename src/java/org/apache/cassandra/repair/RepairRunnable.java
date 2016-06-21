@@ -148,11 +148,16 @@ public class RepairRunnable extends WrappedRunnable implements ProgressEventNoti
 
         final Set<InetAddress> allNeighbors = new HashSet<>();
         List<Pair<Set<InetAddress>, ? extends Collection<Range<Token>>>> commonRanges = new ArrayList<>();
+
+        //pre-calculate output of getLocalRanges and pass it to getNeighbors to increase performance and prevent
+        //calculation multiple times
+        Collection<Range<Token>> keyspaceLocalRanges = storageService.getLocalRanges(keyspace);
+
         try
         {
             for (Range<Token> range : options.getRanges())
             {
-                Set<InetAddress> neighbors = ActiveRepairService.getNeighbors(keyspace, range,
+                Set<InetAddress> neighbors = ActiveRepairService.getNeighbors(keyspace, keyspaceLocalRanges, range,
                                                                               options.getDataCenters(),
                                                                               options.getHosts());
 
@@ -193,7 +198,7 @@ public class RepairRunnable extends WrappedRunnable implements ProgressEventNoti
         long repairedAt;
         try
         {
-            ActiveRepairService.instance.prepareForRepair(parentSession, allNeighbors, options, columnFamilyStores);
+            ActiveRepairService.instance.prepareForRepair(parentSession, FBUtilities.getBroadcastAddress(), allNeighbors, options, columnFamilyStores);
             repairedAt = ActiveRepairService.instance.getParentRepairSession(parentSession).getRepairedAt();
             progress.incrementAndGet();
         }
@@ -230,6 +235,11 @@ public class RepairRunnable extends WrappedRunnable implements ProgressEventNoti
             {
                 public void onSuccess(RepairSessionResult result)
                 {
+                    /**
+                     * If the success message below is modified, it must also be updated on
+                     * {@link org.apache.cassandra.utils.progress.jmx.LegacyJMXProgressSupport}
+                     * for backward-compatibility support.
+                     */
                     String message = String.format("Repair session %s for range %s finished", session.getId(),
                                                    session.getRanges().toString());
                     logger.info(message);
@@ -241,6 +251,11 @@ public class RepairRunnable extends WrappedRunnable implements ProgressEventNoti
 
                 public void onFailure(Throwable t)
                 {
+                    /**
+                     * If the failure message below is modified, it must also be updated on
+                     * {@link org.apache.cassandra.utils.progress.jmx.LegacyJMXProgressSupport}
+                     * for backward-compatibility support.
+                     */
                     String message = String.format("Repair session %s for range %s failed with error %s",
                                                    session.getId(), session.getRanges().toString(), t.getMessage());
                     logger.error(message, t);
@@ -261,7 +276,7 @@ public class RepairRunnable extends WrappedRunnable implements ProgressEventNoti
         ListenableFuture anticompactionResult = Futures.transform(allSessions, new AsyncFunction<List<RepairSessionResult>, Object>()
         {
             @SuppressWarnings("unchecked")
-            public ListenableFuture apply(List<RepairSessionResult> results) throws Exception
+            public ListenableFuture apply(List<RepairSessionResult> results)
             {
                 // filter out null(=failed) results and get successful ranges
                 for (RepairSessionResult sessionResult : results)
